@@ -37,4 +37,6 @@ deps/**/user.toml
 # Streaming EventTrace
 *.etli
 
-/source
+# NOTE: upstream kit-app-template ignores /source (assuming user code lives elsewhere).
+# This fork ships source/ as its raison d'etre — the Boreas Operator Agent app +
+# datacenter.dt.analytics extension live there. Track them.
