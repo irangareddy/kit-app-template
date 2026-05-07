@@ -1,0 +1,52 @@
+# Datacenter DT Viewer — Apple Vision Pro CloudXR server layer.
+# Pulls in the XR bundle + CloudXR transport. Launch this kit when an Apple Vision Pro
+# client (e.g., apple-configurator-sample) is ready to connect.
+#
+# Requires a compatible Apple Vision Pro client on the same LAN. See:
+#   https://docs.omniverse.nvidia.com/avp/latest/setup-sdk.html
+#   https://github.com/NVIDIA-Omniverse/apple-configurator-sample
+
+[package]
+title = "Boreas — Operator Agent (AVP)"
+version = "0.1.0"
+description = "Apple Vision Pro CloudXR streaming server layer for Datacenter DT Viewer"
+keywords = ["experience", "app", "xr", "cloudxr", "apple-vision-pro"]
+template_name = "omni.streaming_configuration"
+
+[dependencies]
+"datacenter.dt.viewer" = {}                        # Main application kit file
+"omni.kit.xr.bundle.apple_vision_pro" = {}         # AVP XR profile + Simulated XR
+# NOTE: "omni.kit.xr.cloudxr" is not yet published for Kit 110 — use Simulated XR
+# in the AR panel (no headset needed). When CloudXR lands on 110, re-enable below.
+#"omni.kit.xr.cloudxr" = {}
+
+[settings]
+# xr.openxr.preferNVOpaqueDataChannel = true      # Requires CloudXR (above)
+rtx.verifyDriverVersion.enabled = false
+
+[settings.app]
+fastShutdown = true
+name = "Datacenter DT Viewer AVP"
+renderer.resolution.height = 1080
+renderer.resolution.width = 1920
+window.height = 1080
+window.width = 1920
+
+[settings.app.extensions]
+registryEnabled = true
+supportedTargets.platform = []
+
+exclude = [
+    "omni.kit.developer.bundle",
+    "omni.kit.widget.cache_indicator",
+]
+
+[settings.app.exts]
+folders.'++' = [
+    "${app}/../exts",
+    "${app}/../apps",
+    "${app}/../extscache"
+]
+
+[settings.app.file]
+ignoreUnsavedOnExit = true

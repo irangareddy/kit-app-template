@@ -1,0 +1,44 @@
+# Datacenter DT Viewer — WebRTC Streaming companion.
+# Runs the same app, headless, exposing a WebRTC endpoint the browser can connect to.
+
+[package]
+title = "Boreas — Operator Agent (Streaming)"
+version = "0.1.0"
+description = "WebRTC streaming configuration for Datacenter DT Viewer"
+keywords = ["experience", "app", "dev", "streaming"]
+template_name = "omni.streaming_configuration"
+
+[dependencies]
+"datacenter.dt.viewer" = {}       # Main application kit file
+"omni.kit.livestream.app" = {}    # WebRTC livestream extension bundle
+
+[settings.app]
+fastShutdown = true
+name = "Datacenter DT Viewer Streaming"
+renderer.resolution.height = 1080
+renderer.resolution.width = 1920
+window.height = 1080
+window.width = 1920
+
+[settings]
+rtx.post.aa.op = 3
+rtx.verifyDriverVersion.enabled = false
+
+[settings.app.extensions]
+registryEnabled = true
+supportedTargets.platform = []
+
+exclude = [
+    "omni.kit.developer.bundle",
+    "omni.kit.widget.cache_indicator",
+]
+
+[settings.app.exts]
+folders.'++' = [
+    "${app}/../exts",
+    "${app}/../apps",
+    "${app}/../extscache"
+]
+
+[settings.app.file]
+ignoreUnsavedOnExit = true
