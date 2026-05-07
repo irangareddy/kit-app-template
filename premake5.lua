@@ -15,3 +15,6 @@ repo_build.prebuild_copy {
 }
 
 -- Apps: for each app generate batch files and a project based on kit files (e.g. my_name.my_app.kit)
+define_app("datacenter.dt.viewer")
+define_app("datacenter.dt.viewer_streaming")
+define_app("datacenter.dt.viewer_avp")
