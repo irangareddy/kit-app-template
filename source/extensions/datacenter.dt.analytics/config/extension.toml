@@ -1,0 +1,14 @@
+[package]
+version = "0.1.0"
+title = "Datacenter DT Analytics"
+description = "Analytics panel for datacenter CFD surrogate model predictions. Switch between FNO/U-Net predictions, ground truth, and error maps. View per-field metrics."
+category = "Simulation"
+keywords = ["datacenter", "CFD", "digital twin", "FNO", "U-Net"]
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+
+[[python.module]]
+name = "datacenter.dt.analytics"

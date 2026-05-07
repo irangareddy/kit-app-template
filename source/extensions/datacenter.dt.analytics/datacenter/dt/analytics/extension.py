@@ -1,0 +1,1164 @@
+"""Datacenter Digital Twin Analytics Extension for Omniverse Kit.
+
+Side-by-side GT vs Prediction comparison with color-coded metrics.
+"""
+
+import os
+import json
+from pathlib import Path
+
+import omni.ext
+import omni.ui as ui
+import omni.usd
+from pxr import Usd, UsdGeom, Gf, Sdf
+
+from . import generate_assets
+
+PROJ_ROOT = Path(os.environ.get("DT_PROJ_ROOT", r"C:\Users\Ranga\298AB-dt-viewer"))
+RAW_DATA_DIR = PROJ_ROOT / "test_data"
+STL_DIR = PROJ_ROOT / "stl"
+RESULTS_DIR = PROJ_ROOT / "results"
+USD_DIR = Path(os.environ.get("DT_USD_DIR", str(PROJ_ROOT / "outputs" / "usd_omniverse")))
+METRICS_DIR = Path(os.environ.get("DT_METRICS_DIR", str(PROJ_ROOT / "outputs" / "omniverse_predictions")))
+
+SAMPLES = [0, 1, 2]
+SAMPLE_LABELS = {0: "Room 0 (config 0)", 1: "Room 1 (config 1)", 2: "Room 2 (config 2)"}
+MODELS = ["fno_pred", "unet_pred"]
+MODEL_LABELS = {"fno_pred": "FNO (28.3M params)", "unet_pred": "U-Net (22.6M params)"}
+MODEL_SHORT = {"fno_pred": "FNO", "unet_pred": "U-Net"}
+FIELDS = ["T", "U_magnitude", "p"]
+FIELD_LABELS = {"T": "Temperature", "U_magnitude": "Velocity Magnitude", "p": "Pressure"}
+FIELD_UNITS = {"T": "\u00b0C", "U_magnitude": "m/s", "p": "Pa"}
+
+# Colors — NVIDIA Omniverse palette
+GREEN = 0xFF00B140      # NVIDIA green (primary brand)
+ACCENT = 0xFF76B900     # NVIDIA accent green (secondary)
+SECONDARY = 0xFF3F3F48  # button secondary fill
+RED = 0xFFE53935
+YELLOW = 0xFFFFC107
+WHITE = 0xFFEEEEEE      # soft white for dark theme
+GRAY = 0xFFA0A0A8
+DARK_BG = 0xFF1F1F28
+CARD_BG = 0xFF2A2A32
+CYAN = 0xFF4FC3F7       # only used for "current view" info strip
+
+# Font sizes — consistent scale
+FS_TITLE = 20
+FS_SUBTITLE = 14
+FS_SECTION = 14
+FS_BODY = 13
+FS_LABEL = 12
+FS_CAPTION = 11
+FS_FOOTER = 10
+
+# Offset for side-by-side (datacenter is ~40m long, offset by 50m)
+SIDE_BY_SIDE_OFFSET = 50.0
+
+
+def _r2_color(r2):
+    if r2 >= 0.9: return GREEN
+    if r2 >= 0.5: return YELLOW
+    return RED
+
+
+def _r2_label(r2):
+    if r2 >= 0.95: return "Excellent"
+    if r2 >= 0.9: return "Good"
+    if r2 >= 0.7: return "Fair"
+    if r2 >= 0.0: return "Poor"
+    return "Negative"
+
+
+def _winner_arrow(fno_val, unet_val, lower_is_better=True):
+    try:
+        fno_val = float(fno_val)
+        unet_val = float(unet_val)
+    except (TypeError, ValueError):
+        return "?"
+    if lower_is_better:
+        if fno_val < unet_val: return "FNO"
+        elif unet_val < fno_val: return "U-Net"
+    else:
+        if fno_val > unet_val: return "FNO"
+        elif unet_val > fno_val: return "U-Net"
+    return "Tie"
+
+
+class DatacenterDTAnalyticsExtension(omni.ext.IExt):
+    WINDOW_TITLE = "Boreas Operator"
+    MENU_PATH = f"Window/{WINDOW_TITLE}"
+
+    def on_startup(self, ext_id):
+        self._window = ui.Window(
+            self.WINDOW_TITLE,
+            width=420,
+            height=820,
+            position_x=40,
+            position_y=80,
+        )
+        try:
+            self._window.dock_order = 0
+            self._window.deferred_dock_in("Property")
+        except Exception as e:
+            print(f"[dt.analytics] dock setup skipped: {e}")
+        self._window.visible = True
+        print(f"[dt.analytics] window '{self.WINDOW_TITLE}' created, visible={self._window.visible}")
+        self._current_sample = 0
+        self._current_model = "fno_pred"
+        self._current_field = "T"
+        self._comparison_mode = True
+        self._show_error = False
+        self._show_isosurface = False
+        self._metrics = {}
+        self._laptop_latency = {}  # measured on this 5080 — filled by _load_metrics
+        self._load_metrics()
+        self._build_ui()
+        self._register_menu()
+
+    def on_shutdown(self):
+        self._unregister_menu()
+        if self._window:
+            self._window.destroy()
+            self._window = None
+
+    def _register_menu(self):
+        try:
+            import omni.kit.menu.utils as menu_utils
+            from omni.kit.menu.utils import MenuItemDescription
+
+            self._menu_items = [
+                MenuItemDescription(
+                    name=self.WINDOW_TITLE,
+                    onclick_fn=self._toggle_window,
+                    ticked=True,
+                    ticked_fn=lambda: bool(self._window and self._window.visible),
+                )
+            ]
+            menu_utils.add_menu_items(self._menu_items, "Window")
+        except Exception as e:
+            print(f"[dt.analytics] could not register Window menu: {e}")
+            self._menu_items = None
+
+    def _unregister_menu(self):
+        if getattr(self, "_menu_items", None):
+            try:
+                import omni.kit.menu.utils as menu_utils
+                menu_utils.remove_menu_items(self._menu_items, "Window")
+            except Exception:
+                pass
+            self._menu_items = None
+
+    def _toggle_window(self):
+        if self._window:
+            self._window.visible = not self._window.visible
+
+    def _load_metrics(self):
+        for idx in SAMPLES:
+            path = METRICS_DIR / f"sample{idx}_metrics.json"
+            if path.exists():
+                with open(str(path)) as f:
+                    self._metrics[idx] = json.load(f)
+
+        # Real measured latencies from the 5080 inference run
+        summary = PROJ_ROOT / "outputs" / "predictions" / "inference_summary.json"
+        if summary.exists():
+            try:
+                with open(summary) as f:
+                    data = json.load(f)
+                lat = data.get("latency_ms", {})
+                for k in ("unet", "fno"):
+                    vs = lat.get(k, [])
+                    if vs:
+                        self._laptop_latency[k] = round(sum(vs) / len(vs), 1)
+            except Exception:
+                pass
+
+    def _ensure_generated(self):
+        marker = USD_DIR / ".generated"
+        if marker.exists():
+            return
+        try:
+            generate_assets.generate(
+                RAW_DATA_DIR, STL_DIR, USD_DIR, METRICS_DIR, RESULTS_DIR
+            )
+            self._load_metrics()
+        except Exception as e:
+            import traceback
+            print(f"[dt.analytics] generate_assets failed: {e}")
+            traceback.print_exc()
+
+    def _load_single(self, model, field, is_error=False, is_iso=False):
+        if is_error:
+            tag = "fno" if model == "fno_pred" else "unet"
+            fname = f"sample{self._current_sample}_{tag}_error_{field}.usdc"
+        elif is_iso:
+            fname = f"sample{self._current_sample}_{model}_T_iso.usdc"
+        else:
+            fname = f"sample{self._current_sample}_{model}_{field}.usdc"
+        return USD_DIR / fname
+
+    def _load_comparison_scene(self):
+        """Load GT and prediction side-by-side in a single USD stage."""
+        field = self._current_field
+        model = self._current_model
+        idx = self._current_sample
+
+        gt_path = self._load_single("ground_truth", field)
+        pred_path = self._load_single(model, field)
+        err_path = self._load_single(model, field, is_error=True) if self._show_error else None
+
+        print(f"[dt.analytics] _load_comparison_scene sample={idx} field={field} model={model}")
+        print(f"[dt.analytics]   GT   : {gt_path}  exists={gt_path.exists()}")
+        print(f"[dt.analytics]   Pred : {pred_path}  exists={pred_path.exists()}")
+        if err_path:
+            print(f"[dt.analytics]   Err  : {err_path}  exists={err_path.exists()}")
+        if not gt_path.exists() or not pred_path.exists():
+            print("[dt.analytics]   ABORT \u2014 missing GT or Prediction file")
+            return
+
+        try:
+            err_tag = "_err" if (self._show_error and err_path and err_path.exists()) else ""
+            compose_path = USD_DIR / f"_compose_s{idx}_{model}_{field}{err_tag}.usda"
+            # Build in-memory to avoid USD's layer registry collision, then Export.
+            stage = Usd.Stage.CreateInMemory()
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.Xform.Define(stage, "/DatacenterComparison")
+
+            gt_ref  = gt_path.as_posix()
+            pred_ref = pred_path.as_posix()
+            print(f"[dt.analytics]   ref GT   = {gt_ref}")
+            print(f"[dt.analytics]   ref Pred = {pred_ref}")
+
+            gt_xf = UsdGeom.Xform.Define(stage, "/DatacenterComparison/GroundTruth")
+            gt_xf.GetPrim().GetReferences().AddReference(gt_ref)
+            gt_xf.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
+
+            pred_xf = UsdGeom.Xform.Define(stage, "/DatacenterComparison/Prediction")
+            pred_xf.GetPrim().GetReferences().AddReference(pred_ref)
+            pred_xf.AddTranslateOp().Set(Gf.Vec3d(0, SIDE_BY_SIDE_OFFSET, 0))
+
+            if self._show_error and err_path and err_path.exists():
+                err_xf = UsdGeom.Xform.Define(stage, "/DatacenterComparison/ErrorMap")
+                err_xf.GetPrim().GetReferences().AddReference(err_path.as_posix())
+                err_xf.AddTranslateOp().Set(Gf.Vec3d(0, SIDE_BY_SIDE_OFFSET * 2, 0))
+
+            stage.GetRootLayer().Export(str(compose_path))
+            print(f"[dt.analytics]   composed stage saved -> {compose_path}")
+            omni.usd.get_context().open_stage(str(compose_path))
+            self._frame_all()
+        except Exception as e:
+            import traceback
+            print(f"[dt.analytics] _load_comparison_scene ERROR: {e}")
+            traceback.print_exc()
+            return
+
+        self._rebuild_metrics_panel()
+
+    def _load_single_scene(self):
+        """Load a single USD file."""
+        if self._show_isosurface:
+            path = self._load_single(self._current_model, "T", is_iso=True)
+        elif self._show_error:
+            path = self._load_single(self._current_model, self._current_field, is_error=True)
+        else:
+            path = self._load_single(self._current_model, self._current_field)
+
+        print(f"[dt.analytics] _load_single_scene -> {path}  exists={path.exists()}")
+        if path.exists():
+            omni.usd.get_context().open_stage(str(path))
+            self._frame_all()
+        else:
+            print("[dt.analytics]   ABORT \u2014 file not found (if Isosurface Mode is checked, iso USDs aren't generated yet)")
+        self._rebuild_metrics_panel()
+
+    def _load_gt_only(self):
+        """Load ground truth only."""
+        self._ensure_generated()
+        path = self._load_single("ground_truth", self._current_field)
+        if path.exists():
+            omni.usd.get_context().open_stage(str(path))
+            self._frame_all()
+        self._rebuild_metrics_panel()
+
+    def _frame_all(self):
+        """Frame the viewport on the user scene, deferred so references resolve first."""
+        import omni.usd
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            print("[dt.analytics] _frame_all: no stage")
+            return
+
+        user_roots = [str(p.GetPath()) for p in stage.GetPseudoRoot().GetChildren()
+                      if not str(p.GetPath()).startswith(("/Omni", "/Render"))]
+        if not user_roots:
+            print("[dt.analytics] _frame_all: no user-scene roots")
+            return
+
+        # Force any payloads/references on these prims to load synchronously.
+        from pxr import Sdf
+        stage.LoadAndUnload({Sdf.Path(p) for p in user_roots}, set())
+
+        try:
+            import omni.kit.commands
+            omni.kit.commands.execute(
+                "SelectPrims", old_selected_paths=[], new_selected_paths=user_roots,
+                expand_in_stage=True,
+            )
+        except Exception as e:
+            print(f"[dt.analytics] SelectPrims failed: {e}")
+
+        import omni.kit.app
+        from pxr import UsdGeom, Gf
+        app = omni.kit.app.get_app()
+
+        async def _deferred():
+            # Wait enough frames for references + RTX to ingest geometry
+            for _ in range(12):
+                await app.next_update_async()
+
+            # Measure bbox NOW (references should be resolved)
+            cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_], useExtentsHint=True)
+            bbox = Gf.BBox3d()
+            for path in user_roots:
+                prim = stage.GetPrimAtPath(path)
+                if prim:
+                    bbox = Gf.BBox3d.Combine(bbox, cache.ComputeWorldBound(prim))
+            r = bbox.ComputeAlignedRange()
+
+            if not r.IsEmpty():
+                try:
+                    from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
+                    frame_viewport_selection(get_active_viewport())
+                    print(f"[dt.analytics] _frame_all: framed via selection (bbox size={r.GetSize()})")
+                    return
+                except Exception as e:
+                    print(f"[dt.analytics] frame_viewport_selection failed: {e}")
+
+            # Fallback: hardcode a known-good camera pose for our fixed data layout.
+            # GT spans ~X 0-38, Y 0-4, Z 0-3.  Pred offset +50 in Y.
+            print("[dt.analytics] _frame_all: bbox still empty, using manual camera")
+            cam = stage.GetPrimAtPath("/OmniverseKit_Persp")
+            if cam:
+                api = UsdGeom.XformCommonAPI(cam)
+                # Eye position — isometric above +X +Y, looking at center (~19, 27, 1.5)
+                api.SetTranslate(Gf.Vec3d(-20.0, -25.0, 40.0))
+                # Rotation in degrees (X tilt, Y yaw, Z roll) that orients the default
+                # -Z camera forward toward the scene center
+                api.SetRotate(Gf.Vec3f(55.0, 0.0, -30.0))
+
+        import asyncio
+        asyncio.ensure_future(_deferred())
+
+    def _on_load(self):
+        print("[dt.analytics] ========== LOAD SCENE ==========")
+        print(f"[dt.analytics]   sample       = {self._current_sample} ({SAMPLE_LABELS.get(self._current_sample)})")
+        print(f"[dt.analytics]   field        = {self._current_field}")
+        print(f"[dt.analytics]   model        = {self._current_model}")
+        print(f"[dt.analytics]   comparison   = {self._comparison_mode}")
+        print(f"[dt.analytics]   show_error   = {self._show_error}")
+        print(f"[dt.analytics]   isosurface   = {self._show_isosurface}")
+        print(f"[dt.analytics]   USD_DIR      = {USD_DIR}")
+        print(f"[dt.analytics]   RAW_DATA_DIR = {RAW_DATA_DIR}")
+        print(f"[dt.analytics]   OPENAI_API_KEY set = {bool(os.environ.get('OPENAI_API_KEY'))}")
+        self._ensure_generated()
+        if self._comparison_mode:
+            self._load_comparison_scene()
+        else:
+            self._load_single_scene()
+
+    # ------------------------------------------------------------------ NL query
+
+    _SPACING_M = 0.04  # grid spacing in meters (matches generate_assets.SPACING)
+
+    _LLM_MODEL = "gpt-4o"
+    _AGENT_MAX_STEPS = 10
+
+    _AGENT_SYSTEM_PROMPT = (
+        "You are the Boreas Operator Agent \u2014 an AI thermal engineer embedded in a 3D Omniverse Kit "
+        "viewer of a datacenter Digital Twin. You have direct control over the viewport (room, field, "
+        "surrogate, camera) and access to full-resolution CFD predictions for three datacenter rooms "
+        "(0, 1, 2).\n\n"
+        "Available data: three rooms each with full-resolution CFD predictions for T (\u00b0C), U_magnitude "
+        "(m/s), and p (Pa). Two neural-operator surrogates are available: FNO (28.3M params) and U-Net "
+        "(22.6M params, the production-recommended model). World axes: X = length (0-38.4 m), Y = width "
+        "(0-3.84 m), Z = height (0-3.2 m), grid spacing 0.04 m. Aggregate metrics across 192 held-out "
+        "test rooms are available for FNO vs U-Net comparison.\n\n"
+        "For every operator question, behave as a thermal engineer briefing the facility operator:\n\n"
+        "1. Investigate first. Use tools to check the current view, navigate to the relevant room or "
+        "field, find extrema, and pull statistics before answering. Never invent numbers \u2014 every "
+        "numerical claim must come from a tool call.\n\n"
+        "2. Show, don't just tell. When you identify a hotspot or anomaly, use frame_camera to drop a "
+        "marker and frame the viewport on the location so the operator sees what you are talking about. "
+        "After set_room / set_field / set_surrogate, call load_scene so the change is visible.\n\n"
+        "3. Answer in operator-engineer voice: cite the quantitative answer with units and world "
+        "coordinates; compare against datacenter standards (ASHRAE A1 hot-aisle envelope 18-27 \u00b0C, "
+        "rack-inlet control tolerance \u00b11 \u00b0C, CRAC delta-T 10-15 \u00b0C); explain operational "
+        "implications (cooling adequacy, hotspot risk, airflow patterns, pressure imbalance); recommend "
+        "immediate / long-term / monitoring actions when warranted; comment on which surrogate to trust "
+        "for the field at hand on model-comparison questions.\n\n"
+        "4. Multi-step reasoning is encouraged. For comparative questions across rooms, call tools "
+        "across all three rooms before concluding.\n\n"
+        "Voice: precise, calm, actionable \u2014 a senior thermal engineer briefing a facility operator "
+        "who needs to act on what you say."
+    )
+
+    _AGENT_TOOLS = [
+        {"type": "function", "function": {
+            "name": "describe_current_view",
+            "description": "Report the room, field, surrogate, and mode currently rendered in the viewer.",
+            "parameters": {"type": "object", "properties": {}},
+        }},
+        {"type": "function", "function": {
+            "name": "set_room",
+            "description": "Switch the active datacenter room (0, 1, or 2). Reloads the scene.",
+            "parameters": {"type": "object",
+                           "properties": {"room": {"type": "integer", "enum": [0, 1, 2]}},
+                           "required": ["room"]},
+        }},
+        {"type": "function", "function": {
+            "name": "set_field",
+            "description": "Switch which CFD field is visualized.",
+            "parameters": {"type": "object",
+                           "properties": {"field": {"type": "string",
+                                                    "enum": ["T", "U_magnitude", "p"]}},
+                           "required": ["field"]},
+        }},
+        {"type": "function", "function": {
+            "name": "set_surrogate",
+            "description": "Pick the surrogate model for comparison ('fno' or 'unet').",
+            "parameters": {"type": "object",
+                           "properties": {"model": {"type": "string", "enum": ["fno", "unet"]}},
+                           "required": ["model"]},
+        }},
+        {"type": "function", "function": {
+            "name": "find_extremum",
+            "description": "Find the highest ('max') or lowest ('min') value of a field in the current "
+                           "room at full resolution, returning value + world coordinates.",
+            "parameters": {"type": "object",
+                           "properties": {"op": {"type": "string", "enum": ["max", "min"]},
+                                          "field": {"type": "string",
+                                                    "enum": ["T", "U_magnitude", "p"]}},
+                           "required": ["op", "field"]},
+        }},
+        {"type": "function", "function": {
+            "name": "get_room_stats",
+            "description": "Return min, max, mean, std of a field in the current room (physical units).",
+            "parameters": {"type": "object",
+                           "properties": {"field": {"type": "string",
+                                                    "enum": ["T", "U_magnitude", "p"]}},
+                           "required": ["field"]},
+        }},
+        {"type": "function", "function": {
+            "name": "get_model_comparison",
+            "description": "Get aggregate MAE / R\u00b2 / latency for FNO vs U-Net across 192 test rooms, "
+                           "optionally filtered to a specific field.",
+            "parameters": {"type": "object",
+                           "properties": {"field": {"type": "string",
+                                                    "enum": ["T", "Ux", "Uy", "Uz", "p"]}}},
+        }},
+        {"type": "function", "function": {
+            "name": "frame_camera",
+            "description": "Place a red marker at a world point (meters) and frame the viewport camera on it.",
+            "parameters": {"type": "object",
+                           "properties": {"x": {"type": "number"},
+                                          "y": {"type": "number"},
+                                          "z": {"type": "number"},
+                                          "label": {"type": "string"}},
+                           "required": ["x", "y", "z"]},
+        }},
+        {"type": "function", "function": {
+            "name": "load_scene",
+            "description": "Re-load the viewer with the current Room/Surrogate/Field/Mode selections. "
+                           "Use after set_room / set_field / set_surrogate so the user sees the change.",
+            "parameters": {"type": "object", "properties": {}},
+        }},
+    ]
+
+    def _parse_query(self, text):
+        """LLM parse first (if OPENAI_API_KEY present), regex fallback."""
+        if not (text or "").strip():
+            return None
+        llm = self._parse_query_llm(text)
+        if llm is not None:
+            return llm + ("llm",)
+        reg = self._parse_query_regex(text)
+        if reg is None:
+            return None
+        return reg + ("regex",)
+
+    def _parse_query_regex(self, text):
+        t = text.strip().lower()
+        op = "max"
+        if any(w in t for w in ("cold", "cool", "lowest", "minimum", "min", "chill")):
+            op = "min"
+        elif any(w in t for w in ("hot", "hottest", "highest", "peak", "warm", "max", "maximum", "spike", "worst", "largest")):
+            op = "max"
+        field = "T"
+        if any(w in t for w in ("press", "static", "pascal")):
+            field = "p"
+        elif any(w in t for w in ("wind", "airflow", "flow", "velocity", "vel ", "speed", "fast", "slow", "air ")):
+            field = "U_magnitude"
+        elif any(w in t for w in ("hot", "cold", "cool", "warm", "temp", "therm")):
+            field = "T"
+        return op, field
+
+    def _parse_query_llm(self, text):
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            return None
+        import urllib.request, urllib.error
+        body = {
+            "model": self._LLM_MODEL,
+            "messages": [
+                {"role": "system", "content":
+                    "You are a parser for questions about a datacenter CFD digital twin. "
+                    "Return strict JSON with two keys: "
+                    "'op' ('max' for hottest/highest/fastest/worst, 'min' for coldest/lowest/slowest), and "
+                    "'field' ('T' for temperature, 'U_magnitude' for airflow/velocity/speed, 'p' for pressure). "
+                    "If ambiguous, assume temperature. No other text."},
+                {"role": "user", "content": text},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        }
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            data=json.dumps(body).encode(),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                resp = json.load(r)
+            content = resp["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            op = parsed.get("op", "max")
+            field = parsed.get("field", "T")
+            if op not in ("max", "min"): op = "max"
+            if field not in ("T", "U_magnitude", "p"): field = "T"
+            return (op, field)
+        except Exception as e:
+            print(f"[dt.analytics] LLM parse failed ({type(e).__name__}: {e}) \u2014 using regex")
+            return None
+
+    def _llm_explain(self, question, op, field, value, world, unit, idx):
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            return None
+        import urllib.request
+        fields_pretty = {"T": "temperature", "U_magnitude": "airflow magnitude", "p": "pressure"}
+        msg = (
+            f"User asked: '{question}'. The surrogate identified the {('highest' if op == 'max' else 'lowest')} "
+            f"{fields_pretty[field]} in Room {idx} as {value:.2f} {unit} at world coordinates "
+            f"(X={world[0]:.2f}, Y={world[1]:.2f}, Z={world[2]:.2f}) meters. "
+            f"In this dataset, X is the length of the room (0-38.4 m), Y is the width (0-3.84 m), "
+            f"Z is the height (0-3.2 m). Rack inlets run along X."
+        )
+        body = {
+            "model": self._LLM_MODEL,
+            "messages": [
+                {"role": "system", "content":
+                    "You are a datacenter cooling engineer explaining a CFD surrogate result to a facility operator. "
+                    "Be specific, under 2 sentences, reference the coordinates where relevant. No markdown."},
+                {"role": "user", "content": msg},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 120,
+        }
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            data=json.dumps(body).encode(),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                resp = json.load(r)
+            return resp["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"[dt.analytics] LLM explain failed: {e}")
+            return None
+
+    def _compute_query(self, op, field):
+        import numpy as np
+        idx = self._current_sample
+        target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
+        if not target_path.exists():
+            return None
+        target = np.load(target_path)
+        if field == "T":
+            arr = target[3] * 4.0 + 39.0
+            unit = "\u00b0C"
+        elif field == "U_magnitude":
+            U = target[:3] * 1.3656 + 1.5984
+            arr = np.sqrt(np.sum(U * U, axis=0))
+            unit = "m/s"
+        else:
+            arr = target[4] * 4.1660 + 6.1227
+            unit = "Pa"
+        flat_idx = int(np.argmax(arr) if op == "max" else np.argmin(arr))
+        ind = np.unravel_index(flat_idx, arr.shape)
+        value = float(arr[ind])
+        world = (ind[2] * self._SPACING_M,  # X from W-index
+                 ind[1] * self._SPACING_M,  # Y from H-index
+                 ind[0] * self._SPACING_M)  # Z from D-index
+        return value, world, unit, ind
+
+    def _mark_and_frame(self, world_xyz):
+        import omni.usd
+        from pxr import Usd, UsdGeom, Gf
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage()
+        if stage is None:
+            return False
+        marker_path = "/World/QueryMarker"
+        prim = stage.GetPrimAtPath(marker_path)
+        if not prim:
+            marker = UsdGeom.Sphere.Define(stage, marker_path)
+            marker.CreateRadiusAttr(0.35)
+            marker.GetDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.15, 0.15)])
+            prim = marker.GetPrim()
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        xformable.AddTranslateOp().Set(Gf.Vec3d(*world_xyz))
+        try:
+            import omni.kit.commands
+            omni.kit.commands.execute(
+                "SelectPrims",
+                old_selected_paths=[], new_selected_paths=[marker_path], expand_in_stage=True,
+            )
+        except Exception:
+            pass
+        try:
+            from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
+            frame_viewport_selection(get_active_viewport())
+        except Exception as e:
+            print(f"[dt.analytics] frame_viewport_selection failed: {e}")
+        return True
+
+    def _on_query(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        if os.environ.get("OPENAI_API_KEY"):
+            self._query_result_label.text = "Thinking\u2026"
+            answer, trace = self._run_agent(text)
+            trace_line = "  \u2192  ".join(trace) if trace else "no tools called"
+            self._query_result_label.text = f"{answer}\n\n[agent: {trace_line}]"
+            return
+
+        # Fallback: no API key — use the old regex path
+        parsed = self._parse_query(text)
+        if parsed is None:
+            self._query_result_label.text = "Couldn't parse \u2014 try 'hottest spot' or 'fastest airflow'."
+            return
+        op, field, parser_tag = parsed
+        res = self._compute_query(op, field)
+        if res is None:
+            self._query_result_label.text = f"No data for {SAMPLE_LABELS.get(self._current_sample, '?')}"
+            return
+        value, world, unit, ind = res
+        self._mark_and_frame(world)
+        self._query_result_label.text = (
+            f"[{parser_tag}] {('highest' if op == 'max' else 'lowest')} "
+            f"{FIELD_LABELS[field]}: {value:.2f} {unit}  "
+            f"at (X={world[0]:.2f}, Y={world[1]:.2f}, Z={world[2]:.2f}) m"
+        )
+
+    # ----------------------------------------------------------------- agent loop
+
+    def _run_agent(self, user_text):
+        """Tool-calling loop over OpenAI. Returns (final_text, trace_list)."""
+        messages = [
+            {"role": "system", "content": self._AGENT_SYSTEM_PROMPT},
+            {"role": "user", "content":
+                f"Current view: {json.dumps(self._tool_describe_current_view())}\n"
+                f"User question: {user_text}"},
+        ]
+        trace = []
+        for step in range(self._AGENT_MAX_STEPS):
+            resp = self._openai_chat(messages, tools=self._AGENT_TOOLS)
+            if resp is None:
+                return "OpenAI call failed.", trace
+            msg = resp["choices"][0]["message"]
+            tool_calls = msg.get("tool_calls") or []
+            messages.append({"role": "assistant",
+                             "content": msg.get("content") or "",
+                             "tool_calls": tool_calls})
+            if not tool_calls:
+                return (msg.get("content") or "(no answer)"), trace
+            for tc in tool_calls:
+                name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                trace.append(name + ("(" + ",".join(f"{k}={v}" for k, v in args.items()) + ")" if args else "()"))
+                result = self._dispatch_tool(name, args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(result)[:1500],
+                })
+        return "Max reasoning steps reached.", trace
+
+    def _openai_chat(self, messages, tools=None):
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            return None
+        import urllib.request
+        body = {"model": self._LLM_MODEL, "messages": messages, "temperature": 0}
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            data=json.dumps(body).encode(),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except Exception as e:
+            print(f"[dt.analytics] openai_chat failed: {type(e).__name__}: {e}")
+            return None
+
+    # ----------------------------------------------------------------- tool impls
+
+    def _dispatch_tool(self, name, args):
+        fn = {
+            "describe_current_view": lambda: self._tool_describe_current_view(),
+            "set_room":              lambda: self._tool_set_room(args.get("room", 0)),
+            "set_field":             lambda: self._tool_set_field(args.get("field", "T")),
+            "set_surrogate":         lambda: self._tool_set_surrogate(args.get("model", "unet")),
+            "find_extremum":         lambda: self._tool_find_extremum(args.get("op", "max"), args.get("field", "T")),
+            "get_room_stats":        lambda: self._tool_get_room_stats(args.get("field", "T")),
+            "get_model_comparison":  lambda: self._tool_get_model_comparison(args.get("field")),
+            "frame_camera":          lambda: self._tool_frame_camera(args.get("x", 0), args.get("y", 0), args.get("z", 0), args.get("label")),
+            "load_scene":            lambda: self._tool_load_scene(),
+        }.get(name)
+        if fn is None:
+            return {"error": f"unknown tool '{name}'"}
+        try:
+            return fn()
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _tool_describe_current_view(self):
+        return {
+            "room": self._current_sample,
+            "room_label": SAMPLE_LABELS.get(self._current_sample, f"Sample {self._current_sample}"),
+            "field": self._current_field,
+            "surrogate": "unet" if self._current_model == "unet_pred" else "fno",
+            "comparison_mode": self._comparison_mode,
+            "show_error_map": self._show_error,
+        }
+
+    def _tool_set_room(self, room):
+        if room not in SAMPLES:
+            return {"error": f"room must be one of {SAMPLES}"}
+        self._current_sample = int(room)
+        return {"ok": True, "room": self._current_sample}
+
+    def _tool_set_field(self, field):
+        if field not in FIELDS:
+            return {"error": f"field must be one of {FIELDS}"}
+        self._current_field = field
+        return {"ok": True, "field": field}
+
+    def _tool_set_surrogate(self, model):
+        if model not in ("fno", "unet"):
+            return {"error": "model must be 'fno' or 'unet'"}
+        self._current_model = f"{model}_pred"
+        return {"ok": True, "model": model}
+
+    def _tool_find_extremum(self, op, field):
+        res = self._compute_query(op, field)
+        if res is None:
+            return {"error": "target data missing for this room"}
+        value, world, unit, ind = res
+        return {
+            "op": op, "field": field,
+            "value": round(value, 3), "unit": unit,
+            "world_xyz_m": [round(v, 3) for v in world],
+            "grid_index_zyx": [int(ind[0]), int(ind[1]), int(ind[2])],
+            "room": self._current_sample,
+        }
+
+    def _tool_get_room_stats(self, field):
+        import numpy as np
+        idx = self._current_sample
+        target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
+        if not target_path.exists():
+            return {"error": "target not on disk"}
+        target = np.load(target_path)
+        if field == "T":
+            arr = target[3] * 4.0 + 39.0; unit = "\u00b0C"
+        elif field == "U_magnitude":
+            U = target[:3] * 1.3656 + 1.5984
+            arr = np.sqrt(np.sum(U * U, axis=0)); unit = "m/s"
+        else:
+            arr = target[4] * 4.1660 + 6.1227; unit = "Pa"
+        return {
+            "field": field, "unit": unit, "room": idx,
+            "min":  round(float(arr.min()),  3),
+            "max":  round(float(arr.max()),  3),
+            "mean": round(float(arr.mean()), 3),
+            "std":  round(float(arr.std()),  3),
+        }
+
+    def _tool_get_model_comparison(self, field=None):
+        idx = self._current_sample
+        m = self._metrics.get(idx)
+        if not m:
+            return {"error": "no metrics loaded"}
+        fno, unet = m.get("FNO", {}), m.get("UNet", {})
+        out = {
+            "latency_ms": {"fno": fno.get("inference_ms"), "unet": unet.get("inference_ms")},
+            "laptop_measured_latency_ms": self._laptop_latency,
+        }
+        fields = [field] if field in ("T", "Ux", "Uy", "Uz", "p") else ["T", "Ux", "Uy", "Uz", "p"]
+        out["per_field"] = {
+            fn: {"fno":  {"MAE": fno.get(fn, {}).get("MAE"),  "R2": fno.get(fn, {}).get("R2")},
+                 "unet": {"MAE": unet.get(fn, {}).get("MAE"), "R2": unet.get(fn, {}).get("R2")}}
+            for fn in fields
+        }
+        return out
+
+    def _tool_frame_camera(self, x, y, z, label=None):
+        ok = self._mark_and_frame((float(x), float(y), float(z)))
+        return {"ok": bool(ok), "x": x, "y": y, "z": z, "label": label}
+
+    def _tool_load_scene(self):
+        self._ensure_generated()
+        if self._comparison_mode:
+            self._load_comparison_scene()
+        else:
+            self._load_single_scene()
+        return {"ok": True, "loaded_view": self._tool_describe_current_view()}
+
+    def _rebuild_metrics_panel(self):
+        """Unified, scannable metrics view."""
+        self._metrics_frame.clear()
+        idx = self._current_sample
+        field = self._current_field
+        model = self._current_model
+
+        with self._metrics_frame:
+            with ui.VStack(spacing=10):
+                self._section_view_header(idx, field, model)
+
+                if idx not in self._metrics:
+                    ui.Label("No metrics on disk. Click GT Only or Load Scene to generate.",
+                             style={"color": RED, "font_size": FS_BODY})
+                    return
+
+                data = self._metrics[idx]
+                fno = data.get("FNO", {})
+                unet = data.get("UNet", {})
+
+                self._section_winner_banner(fno, unet)
+                self._section_accuracy_table(fno, unet, field)
+                self._section_deployment(fno, unet)
+                self._section_room_range(fno, unet, field)
+                self._section_context_note()
+
+    # ------------------------------------------------------------------ sections
+
+    def _section_view_header(self, idx, field, model):
+        """Compact current-view strip."""
+        mode = "Side-by-Side" if self._comparison_mode else "Single"
+        if self._show_error:
+            mode += " + Error"
+        if self._show_isosurface:
+            mode = "Isosurface"
+
+        with ui.ZStack(height=52):
+            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
+            with ui.VStack(spacing=3):
+                ui.Spacer(height=6)
+                with ui.HStack():
+                    ui.Spacer(width=10)
+                    ui.Label(
+                        f"{SAMPLE_LABELS.get(idx, f'Sample {idx}')}  \u2022  "
+                        f"{FIELD_LABELS[field]} ({FIELD_UNITS[field]})  \u2022  {mode}",
+                        style={"font_size": FS_SECTION, "color": CYAN},
+                    )
+                with ui.HStack():
+                    ui.Spacer(width=10)
+                    if self._comparison_mode:
+                        sub = f"Left: Ground Truth (OpenFOAM)    Right: {MODEL_SHORT[model]} prediction"
+                    else:
+                        sub = f"Showing: {MODEL_SHORT.get(model, 'Ground Truth')}"
+                    ui.Label(sub, style={"font_size": FS_LABEL, "color": GRAY})
+
+    def _section_winner_banner(self, fno, unet):
+        """One-line verdict across all fields + latency."""
+        fields = ["T", "Ux", "Uy", "Uz", "p"]
+        unet_wins = 0
+        for fn in fields:
+            f_mae = fno.get(fn, {}).get("MAE")
+            u_mae = unet.get(fn, {}).get("MAE")
+            if f_mae is not None and u_mae is not None and u_mae < f_mae:
+                unet_wins += 1
+        f_ms = fno.get("inference_ms")
+        u_ms = unet.get("inference_ms")
+        latency_winner = "U-Net" if (f_ms is not None and u_ms is not None and u_ms < f_ms) else (
+            "FNO" if (f_ms is not None and u_ms is not None and f_ms < u_ms) else None)
+
+        with ui.ZStack(height=44):
+            ui.Rectangle(style={"background_color": 0xFF1E3320, "border_radius": 6,
+                                "border_color": GREEN, "border_width": 1})
+            with ui.HStack():
+                ui.Spacer(width=12)
+                with ui.VStack(spacing=2):
+                    ui.Spacer(height=6)
+                    ui.Label(f"Overall  \u2014  U-Net wins {unet_wins} of {len(fields)} fields",
+                             style={"font_size": FS_SECTION, "color": GREEN})
+                    tag = (f"and is faster on training hardware (GB10)"
+                           if latency_winner == "U-Net" else
+                           f"and {latency_winner or 'both'} lead on latency")
+                    ui.Label(tag, style={"font_size": FS_LABEL, "color": GRAY})
+
+    def _section_accuracy_table(self, fno, unet, current_field):
+        """Unified MAE + R² table, one row per field."""
+        ui.Label("Per-field accuracy  \u2014  192 test rooms on GB10",
+                 style={"font_size": FS_SECTION, "color": WHITE})
+
+        with ui.HStack(height=20):
+            ui.Label("  Field",          width=46, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("FNO MAE",          width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("U-Net MAE",        width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("FNO R\u00b2",       width=50, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("U-Net R\u00b2",     width=54, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("Win",              width=46, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+
+        unit_for = {"T": "\u00b0C", "Ux": "m/s", "Uy": "m/s", "Uz": "m/s", "p": "Pa"}
+        for fn in ["T", "Ux", "Uy", "Uz", "p"]:
+            f_mae = fno.get(fn, {}).get("MAE")
+            u_mae = unet.get(fn, {}).get("MAE")
+            f_r2  = fno.get(fn, {}).get("R2")
+            u_r2  = unet.get(fn, {}).get("R2")
+
+            winner = _winner_arrow(f_mae, u_mae, lower_is_better=True) if (f_mae is not None and u_mae is not None) else "?"
+            win_color = GREEN if winner == "U-Net" else ACCENT if winner == "FNO" else GRAY
+            is_current = (fn == current_field) or (fn in ("Ux", "Uy", "Uz") and current_field == "U_magnitude")
+            row_bg = 0xFF2F3A2F if is_current else 0x00000000  # subtle green-tinted highlight
+
+            with ui.ZStack(height=24):
+                ui.Rectangle(style={"background_color": row_bg, "border_radius": 3})
+                with ui.HStack():
+                    ui.Label(f"  {fn}",             width=46, style={"font_size": FS_BODY, "color": WHITE})
+                    ui.Label(self._fmt_mae(f_mae, unit_for[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
+                    ui.Label(self._fmt_mae(u_mae, unit_for[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": WHITE})
+                    ui.Label(self._fmt_r2(f_r2),    width=50, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": _r2_color(f_r2) if f_r2 is not None else GRAY})
+                    ui.Label(self._fmt_r2(u_r2),    width=54, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": _r2_color(u_r2) if u_r2 is not None else GRAY})
+                    ui.Label(winner,                 width=46, alignment=ui.Alignment.RIGHT, style={"font_size": FS_LABEL, "color": win_color})
+
+    def _section_deployment(self, fno, unet):
+        """Training-hardware vs this-laptop latency comparison."""
+        ui.Label("Deployment  \u2014  inference latency", style={"font_size": FS_SECTION, "color": WHITE})
+        with ui.HStack(height=20):
+            ui.Label("  Model",         width=76, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("Params",          width=60, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("GB10 paper",      width=78, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+            ui.Label("5080 measured",   width=96, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
+
+        rows = [
+            ("FNO",    "28.3 M", fno.get("inference_ms"),  self._laptop_latency.get("fno")),
+            ("U-Net",  "22.6 M", unet.get("inference_ms"), self._laptop_latency.get("unet")),
+        ]
+        for name, params, gb10, laptop in rows:
+            with ui.HStack(height=22):
+                ui.Label(f"  {name}",                      width=76, style={"font_size": FS_BODY, "color": WHITE})
+                ui.Label(params,                             width=60, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
+                ui.Label(f"{gb10} ms" if gb10 is not None else "\u2013",
+                         width=78, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
+                ui.Label(f"{laptop} ms" if laptop is not None else "\u2013",
+                         width=96, alignment=ui.Alignment.RIGHT,
+                         style={"font_size": FS_BODY, "color": ACCENT if laptop is not None else GRAY})
+
+    def _section_room_range(self, fno, unet, field):
+        """Compact current-field GT range for the selected room."""
+        sel = fno.get(field, fno.get("T", {})) or unet.get(field, unet.get("T", {}))
+        gt_r = sel.get("gt_range") if sel else None
+        if not gt_r or gt_r[0] == "?":
+            return
+        with ui.ZStack(height=28):
+            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
+            with ui.HStack():
+                ui.Spacer(width=10)
+                ui.Label(f"This room \u2014 GT {FIELD_LABELS[field]} range:",
+                         style={"font_size": FS_LABEL, "color": GRAY})
+                ui.Spacer(width=6)
+                ui.Label(f"[{gt_r[0]}, {gt_r[1]}] {FIELD_UNITS[field]}",
+                         style={"font_size": FS_BODY, "color": WHITE})
+
+    def _section_context_note(self):
+        """Bottom caption about data source + resolution."""
+        with ui.ZStack(height=52):
+            ui.Rectangle(style={"background_color": 0xFF242430, "border_radius": 6})
+            with ui.VStack(spacing=1):
+                ui.Spacer(height=6)
+                with ui.HStack():
+                    ui.Spacer(width=10)
+                    ui.Label("Full-resolution grid: 80 \u00d7 96 \u00d7 960 = 7.37 M points / room",
+                             style={"font_size": FS_CAPTION, "color": GRAY}, word_wrap=True)
+                with ui.HStack():
+                    ui.Spacer(width=10)
+                    ui.Label("Dataset: NVIDIA + Wistron PhysicsNeMo-Datacenter-CFD (Apache-2.0)",
+                             style={"font_size": FS_CAPTION, "color": GRAY}, word_wrap=True)
+
+    # ------------------------------------------------------------------ format helpers
+
+    @staticmethod
+    def _fmt_mae(v, unit):
+        if v is None:
+            return "\u2013"
+        return f"{v:.3f} {unit}"
+
+    @staticmethod
+    def _fmt_r2(v):
+        if v is None:
+            return "\u2013"
+        return f"{v:.3f}"
+
+    def _card(self, title, rows):
+        with ui.ZStack(height=20 + len(rows) * 24 + (24 if title else 0)):
+            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
+            with ui.VStack(spacing=2):
+                ui.Spacer(height=4)
+                if title:
+                    with ui.HStack():
+                        ui.Spacer(width=8)
+                        ui.Label(title, style={"font_size": 13, "color": WHITE})
+                for label, value, color in rows:
+                    with ui.HStack(height=22):
+                        ui.Spacer(width=12)
+                        ui.Label(label, width=100, style={"font_size": 12, "color": GRAY})
+                        ui.Label(str(value), style={"font_size": 13, "color": color})
+
+    def _build_ui(self):
+        with self._window.frame:
+            with ui.VStack(spacing=6):
+
+                # Header
+                with ui.ZStack(height=50):
+                    ui.Rectangle(style={"background_color": ACCENT, "border_radius": 8})
+                    with ui.VStack():
+                        ui.Spacer(height=6)
+                        ui.Label("  Datacenter Digital Twin", style={"font_size": FS_TITLE, "color": WHITE})
+                        ui.Label("  FNO vs U-Net \u2014 Full-Resolution CFD Surrogate Explorer", style={"font_size": FS_SUBTITLE, "color": 0xFFE8F5D0})
+
+                ui.Spacer(height=4)
+
+                # Controls
+                with ui.CollapsableFrame("Controls", height=0, collapsed=False):
+                    with ui.VStack(spacing=6):
+                        with ui.HStack(height=26):
+                            ui.Label("Room:", width=90, style={"font_size": 13})
+                            combo_s = ui.ComboBox(0, *[SAMPLE_LABELS.get(i, f"Sample {i}") for i in SAMPLES])
+                            combo_s.model.add_item_changed_fn(lambda m, _: self._set("sample", m.get_item_value_model().as_int))
+
+                        with ui.HStack(height=26):
+                            ui.Label("Surrogate:", width=90, style={"font_size": 13})
+                            combo_m = ui.ComboBox(0, *[MODEL_LABELS[k] for k in MODELS])
+                            combo_m.model.add_item_changed_fn(lambda m, _: self._set("model", m.get_item_value_model().as_int))
+
+                        with ui.HStack(height=26):
+                            ui.Label("Field:", width=90, style={"font_size": 13})
+                            combo_f = ui.ComboBox(0, *[f"{FIELD_LABELS[k]} ({FIELD_UNITS[k]})" for k in FIELDS])
+                            combo_f.model.add_item_changed_fn(lambda m, _: self._set("field", m.get_item_value_model().as_int))
+
+                        ui.Spacer(height=2)
+
+                        with ui.HStack(height=24, spacing=6):
+                            cb1 = ui.CheckBox(width=18)
+                            cb1.model.set_value(True)
+                            cb1.model.add_value_changed_fn(lambda m: self._set("compare", m.as_bool))
+                            ui.Label("Side-by-side (GT left | Pred right)", style={"font_size": 12})
+
+                        with ui.HStack(height=24, spacing=6):
+                            cb2 = ui.CheckBox(width=18)
+                            cb2.model.set_value(False)
+                            cb2.model.add_value_changed_fn(lambda m: self._set("error", m.as_bool))
+                            ui.Label("Show Error Map (3rd row)", style={"font_size": 12})
+
+                        with ui.HStack(height=24, spacing=6):
+                            cb3 = ui.CheckBox(width=18)
+                            cb3.model.set_value(False)
+                            cb3.model.add_value_changed_fn(lambda m: self._set("iso", m.as_bool))
+                            ui.Label("Isosurface Mode (T only)", style={"font_size": 12})
+
+                ui.Spacer(height=4)
+
+                # Action buttons
+                with ui.HStack(height=36, spacing=6):
+                    btn_load = ui.Button(
+                        "Load Scene",
+                        style={"background_color": ACCENT, "color": WHITE,
+                               "font_size": FS_BODY, "border_radius": 6},
+                    )
+                    btn_load.set_clicked_fn(self._on_load)
+                    btn_gt = ui.Button(
+                        "GT Only",
+                        style={"background_color": SECONDARY, "color": WHITE,
+                               "font_size": FS_BODY, "border_radius": 6},
+                    )
+                    btn_gt.set_clicked_fn(self._load_gt_only)
+
+                ui.Spacer(height=4)
+
+                # Ask-the-Twin — natural-language query over the full-res target
+                with ui.CollapsableFrame("Ask the Twin", height=0, collapsed=False):
+                    with ui.VStack(spacing=6):
+                        with ui.HStack(height=28, spacing=6):
+                            self._query_field = ui.StringField(height=26)
+                            self._query_field.model.set_value("where is the hottest spot?")
+                            btn_ask = ui.Button(
+                                "Ask",
+                                width=72,
+                                style={"background_color": GREEN, "color": WHITE,
+                                       "font_size": FS_BODY, "border_radius": 6},
+                            )
+                            btn_ask.set_clicked_fn(
+                                lambda: self._on_query(self._query_field.model.get_value_as_string())
+                            )
+                        self._query_result_label = ui.Label(
+                            "Type a question and click Ask. The camera will frame the answer.",
+                            style={"font_size": FS_LABEL, "color": GRAY},
+                            word_wrap=True,
+                            height=0,
+                        )
+                        with ui.HStack(height=18, spacing=0):
+                            ui.Label("Try:", width=30, style={"font_size": FS_CAPTION, "color": GRAY})
+                            ui.Label("'hottest spot'  \u00b7  'coldest aisle'  \u00b7  "
+                                    "'fastest airflow'  \u00b7  'highest pressure'",
+                                    style={"font_size": FS_CAPTION, "color": GRAY},
+                                    word_wrap=True)
+
+                ui.Spacer(height=4)
+
+                # Metrics panel
+                with ui.CollapsableFrame("Analytics & Metrics", height=0, collapsed=False):
+                    self._metrics_frame = ui.VStack(spacing=4)
+
+                # Initial metrics
+                self._rebuild_metrics_panel()
+
+                ui.Spacer(height=2)
+                ui.Label("SJSU CMPE 298AB  |  NVIDIA PhysicsNeMo-Datacenter-CFD dataset (960 rooms, Apache-2.0)",
+                         style={"font_size": 10, "color": 0xFF666666})
+
+    def _set(self, key, value):
+        if key == "sample":
+            self._current_sample = SAMPLES[value]
+        elif key == "model":
+            self._current_model = MODELS[value]
+        elif key == "field":
+            self._current_field = FIELDS[value]
+        elif key == "compare":
+            self._comparison_mode = value
+        elif key == "error":
+            self._show_error = value
+        elif key == "iso":
+            self._show_isosurface = value
