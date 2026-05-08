@@ -720,8 +720,8 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                     ui.Rectangle(style={"background_color": ACCENT, "border_radius": 8})
                     with ui.VStack():
                         ui.Spacer(height=6)
-                        ui.Label("  Datacenter Digital Twin", style={"font_size": FS_TITLE, "color": WHITE})
-                        ui.Label("  FNO vs U-Net \u2014 Full-Resolution CFD Surrogate Explorer", style={"font_size": FS_SUBTITLE, "color": 0xFFE8F5D0})
+                        ui.Label("  Boreas Operator", style={"font_size": FS_TITLE, "color": WHITE})
+                        ui.Label("  Datacenter operator console \u2014 ask the agent or drive the viewport directly", style={"font_size": FS_SUBTITLE, "color": 0xFFE8F5D0})
 
                 ui.Spacer(height=4)
 
@@ -729,17 +729,20 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                 with ui.CollapsableFrame("Controls", height=0, collapsed=False):
                     with ui.VStack(spacing=6):
                         with ui.HStack(height=26):
-                            ui.Label("Room:", width=90, style={"font_size": 13})
+                            ui.Label("Room:", width=90, style={"font_size": 13},
+                                     tooltip="Datacenter sample (rack-layout configuration). 3 of the 192 test rooms are pre-rendered for the demo.")
                             combo_s = ui.ComboBox(0, *[SAMPLE_LABELS.get(i, f"Sample {i}") for i in SAMPLES])
                             combo_s.model.add_item_changed_fn(lambda m, _: self._set("sample", m.get_item_value_model().as_int))
 
                         with ui.HStack(height=26):
-                            ui.Label("Surrogate:", width=90, style={"font_size": 13})
+                            ui.Label("Surrogate:", width=90, style={"font_size": 13},
+                                     tooltip="Trained ML surrogate model. Boreas trains 6 models (FNO, U-Net, PI-FNO, PI-U-Net, Transolver, POD+MLP) — only FNO and U-Net have USD viewport assets in this build; the other 4 appear in the metrics tables.")
                             combo_m = ui.ComboBox(0, *[MODEL_LABELS[k] for k in MODELS])
                             combo_m.model.add_item_changed_fn(lambda m, _: self._set("model", m.get_item_value_model().as_int))
 
                         with ui.HStack(height=26):
-                            ui.Label("Field:", width=90, style={"font_size": 13})
+                            ui.Label("Field:", width=90, style={"font_size": 13},
+                                     tooltip="Which CFD field to visualize: T = temperature (degrees C), U_magnitude = airflow speed (m/s), p = static pressure (Pa).")
                             combo_f = ui.ComboBox(0, *[f"{FIELD_LABELS[k]} ({FIELD_UNITS[k]})" for k in FIELDS])
                             combo_f.model.add_item_changed_fn(lambda m, _: self._set("field", m.get_item_value_model().as_int))
 
@@ -749,19 +752,22 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                             cb1 = ui.CheckBox(width=18)
                             cb1.model.set_value(True)
                             cb1.model.add_value_changed_fn(lambda m: self._set("compare", m.as_bool))
-                            ui.Label("Side-by-side (GT left | Pred right)", style={"font_size": 12})
+                            ui.Label("Side-by-side (GT left | Pred right)", style={"font_size": 12},
+                                     tooltip="Show ground truth alongside the prediction (offset 50 m). Off = prediction only. Independent of the other two checkboxes.")
 
                         with ui.HStack(height=24, spacing=6):
                             cb2 = ui.CheckBox(width=18)
                             cb2.model.set_value(False)
                             cb2.model.add_value_changed_fn(lambda m: self._set("error", m.as_bool))
-                            ui.Label("Show Error Map (3rd row)", style={"font_size": 12})
+                            ui.Label("Show Error Map (3rd row)", style={"font_size": 12},
+                                     tooltip="Add a 3rd offset row showing per-voxel |Prediction - GT| as a magma colormap. Hot spots = where the surrogate is least accurate.")
 
                         with ui.HStack(height=24, spacing=6):
                             cb3 = ui.CheckBox(width=18)
                             cb3.model.set_value(False)
                             cb3.model.add_value_changed_fn(lambda m: self._set("iso", m.as_bool))
-                            ui.Label("Isosurface Mode (T only)", style={"font_size": 12})
+                            ui.Label("Isosurface Mode (T only)", style={"font_size": 12},
+                                     tooltip="Render temperature as a marching-cubes isosurface mesh (solid 3D contour) instead of a colored point cloud. Currently only available for T; U and p don't have iso USDs in this build.")
 
                 ui.Spacer(height=4)
 
@@ -771,12 +777,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                         "Load Scene",
                         style={"background_color": ACCENT, "color": WHITE,
                                "font_size": FS_BODY, "border_radius": 6},
+                        tooltip="Apply the current Room / Surrogate / Field / checkbox selection: assemble the USD compose stage and frame the camera. Press this after changing any control.",
                     )
                     btn_load.set_clicked_fn(self._on_load)
                     btn_gt = ui.Button(
                         "GT Only",
                         style={"background_color": SECONDARY, "color": WHITE,
                                "font_size": FS_BODY, "border_radius": 6},
+                        tooltip="Load only the ground-truth USD for the current Room and Field — no surrogate prediction, no error overlay, no isosurface. Useful as a clean reference view.",
                     )
                     btn_gt.set_clicked_fn(self._load_gt_only)
 
