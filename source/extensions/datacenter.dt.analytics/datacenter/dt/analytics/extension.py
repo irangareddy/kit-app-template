@@ -550,176 +550,159 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         return {"ok": True, "loaded_view": self._tool_describe_current_view()}
 
     def _rebuild_metrics_panel(self):
-        """Unified, scannable metrics view."""
+        """Focused metrics view — 3 single-purpose strips + a collapsible full table.
+
+        Each strip answers ONE question for the operator at-a-glance. The full
+        per-field FNO vs U-Net table is collapsed by default; expand for committee
+        questions or detail review."""
         self._metrics_frame.clear()
         idx = self.state.sample
         field = self.state.field
-        model = self.state.model
 
         with self._metrics_frame:
-            with ui.VStack(spacing=10):
-                self._section_view_header(idx, field, model)
-
+            with ui.VStack(spacing=8):
                 if idx not in self._metrics:
-                    ui.Label("No metrics on disk. Click GT Only or Load Scene to generate.",
-                             style={"color": RED, "font_size": FS_BODY})
+                    ui.Label("No metrics on disk for this room. Click GT Only or Load Scene to generate.",
+                             style={"color": Color.RED, "font_size": Font.BODY}, word_wrap=True)
                     return
 
                 data = self._metrics[idx]
-                fno = data.get("FNO", {})
-                unet = data.get("UNet", {})
+                fno  = data.get("FNO",  {}) or {}
+                unet = data.get("UNet", {}) or {}
 
-                self._section_winner_banner(fno, unet)
-                self._section_accuracy_table(fno, unet, field)
-                self._section_deployment(fno, unet)
+                self._section_focus(fno, unet, field)
+                self._section_speed(fno, unet)
                 self._section_room_range(fno, unet, field)
-                self._section_context_note()
+
+                ui.Spacer(height=2)
+                with ui.CollapsableFrame("Full per-field comparison (FNO vs U-Net)",
+                                         height=0, collapsed=True):
+                    self._section_full_table(fno, unet, field)
 
     # ------------------------------------------------------------------ sections
 
-    def _section_view_header(self, idx, field, model):
-        """Compact current-view strip."""
-        mode = "Side-by-Side" if self.state.comparison_mode else "Single"
-        if self.state.show_error:
-            mode += " + Error"
-        if self.state.show_isosurface:
-            mode = "Isosurface"
+    # NOTE on field naming: the panel surfaces three operator-friendly fields
+    # (T, U_magnitude, p) but the metrics JSON uses five raw channels (T, Ux, Uy,
+    # Uz, p) — training was per-component for velocity. When the operator picks
+    # U_magnitude, we average the three velocity-component MAEs for the focus strip.
+    _PANEL_TO_METRIC = {"T": ["T"], "U_magnitude": ["Ux", "Uy", "Uz"], "p": ["p"]}
+    _UNIT_FOR = {"T": "°C", "Ux": "m/s", "Uy": "m/s", "Uz": "m/s", "p": "Pa"}
 
-        with ui.ZStack(height=52):
-            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
-            with ui.VStack(spacing=3):
+    def _best_mae_for_field(self, model_metrics, panel_field):
+        """Return (mae, unit) for a panel field, averaging Ux/Uy/Uz when needed."""
+        keys = self._PANEL_TO_METRIC.get(panel_field, [panel_field])
+        values = [model_metrics.get(k, {}).get("MAE") for k in keys]
+        values = [v for v in values if v is not None]
+        if not values:
+            return None, self._UNIT_FOR.get(keys[0], "")
+        return sum(values) / len(values), self._UNIT_FOR.get(keys[0], "")
+
+    def _section_focus(self, fno, unet, panel_field):
+        """Highlight the best surrogate for the field the operator is currently viewing."""
+        f_mae, unit = self._best_mae_for_field(fno,  panel_field)
+        u_mae, _    = self._best_mae_for_field(unet, panel_field)
+        field_label = FIELD_LABELS.get(panel_field, panel_field)
+        if f_mae is None or u_mae is None:
+            return
+
+        winner_name = "U-Net" if u_mae < f_mae else ("FNO" if f_mae < u_mae else "Tie")
+        winner_mae  = u_mae if winner_name == "U-Net" else f_mae
+        loser_mae   = f_mae if winner_name == "U-Net" else u_mae
+        loser_name  = "FNO" if winner_name == "U-Net" else "U-Net"
+        ratio = (loser_mae / winner_mae) if winner_mae > 0 else None
+        ratio_text = (f"  —  {ratio:.1f}× more accurate than {loser_name}"
+                      if ratio else "")
+
+        with ui.ZStack(height=58):
+            ui.Rectangle(style={"background_color": Color.GREEN_BANNER, "border_radius": 6,
+                                "border_color": Color.GREEN_PRIMARY, "border_width": 1})
+            with ui.VStack(spacing=2):
                 ui.Spacer(height=6)
                 with ui.HStack():
-                    ui.Spacer(width=10)
-                    ui.Label(
-                        f"{SAMPLE_LABELS.get(idx, f'Sample {idx}')}  \u2022  "
-                        f"{FIELD_LABELS[field]} ({FIELD_UNITS[field]})  \u2022  {mode}",
-                        style={"font_size": FS_SECTION, "color": CYAN},
-                    )
+                    ui.Spacer(width=12)
+                    ui.Label(f"Best for {field_label}:  {winner_name}",
+                             style={"font_size": Font.SECTION, "color": Color.GREEN_PRIMARY})
                 with ui.HStack():
-                    ui.Spacer(width=10)
-                    if self.state.comparison_mode:
-                        sub = f"Left: Ground Truth (OpenFOAM)    Right: {MODEL_SHORT[model]} prediction"
-                    else:
-                        sub = f"Showing: {MODEL_SHORT.get(model, 'Ground Truth')}"
-                    ui.Label(sub, style={"font_size": FS_LABEL, "color": GRAY})
+                    ui.Spacer(width=12)
+                    ui.Label(f"{winner_mae:.3f} {unit} MAE{ratio_text}",
+                             style={"font_size": Font.LABEL, "color": Color.GRAY}, word_wrap=True)
 
-    def _section_winner_banner(self, fno, unet):
-        """One-line verdict across all fields + latency."""
-        fields = ["T", "Ux", "Uy", "Uz", "p"]
-        unet_wins = 0
-        for fn in fields:
-            f_mae = fno.get(fn, {}).get("MAE")
-            u_mae = unet.get(fn, {}).get("MAE")
-            if f_mae is not None and u_mae is not None and u_mae < f_mae:
-                unet_wins += 1
-        f_ms = fno.get("inference_ms")
+    def _section_speed(self, fno, unet):
+        """One-line inference speed story anchored to the CFD baseline."""
         u_ms = unet.get("inference_ms")
-        latency_winner = "U-Net" if (f_ms is not None and u_ms is not None and u_ms < f_ms) else (
-            "FNO" if (f_ms is not None and u_ms is not None and f_ms < u_ms) else None)
+        f_ms = fno.get("inference_ms")
+        if u_ms is None and f_ms is None:
+            return
+        if u_ms is not None and (f_ms is None or u_ms <= f_ms):
+            ms, who = u_ms, "U-Net"
+        else:
+            ms, who = f_ms, "FNO"
+        with ui.ZStack(height=42):
+            ui.Rectangle(style={"background_color": Color.CARD_BG, "border_radius": 6})
+            with ui.VStack(spacing=2):
+                ui.Spacer(height=6)
+                with ui.HStack():
+                    ui.Spacer(width=12)
+                    ui.Label(f"Inference: {ms:.0f} ms ({who})",
+                             style={"font_size": Font.SECTION, "color": Color.WHITE})
+                with ui.HStack():
+                    ui.Spacer(width=12)
+                    ui.Label("~10,000× faster than the 15-hour OpenFOAM baseline",
+                             style={"font_size": Font.LABEL, "color": Color.GRAY})
 
-        with ui.ZStack(height=44):
-            ui.Rectangle(style={"background_color": 0xFF1E3320, "border_radius": 6,
-                                "border_color": GREEN, "border_width": 1})
+    def _section_room_range(self, fno, unet, panel_field):
+        """Single-line GT range for the selected field, this room."""
+        keys = self._PANEL_TO_METRIC.get(panel_field, [panel_field])
+        gt_r = None
+        for src in (fno, unet):
+            for k in keys:
+                rng = (src.get(k) or {}).get("gt_range")
+                if rng and rng[0] != "?":
+                    gt_r = rng
+                    break
+            if gt_r: break
+        if not gt_r:
+            return
+        unit = FIELD_UNITS.get(panel_field, "")
+        field_label = FIELD_LABELS.get(panel_field, panel_field)
+        with ui.ZStack(height=28):
+            ui.Rectangle(style={"background_color": Color.CARD_BG, "border_radius": 6})
             with ui.HStack():
                 ui.Spacer(width=12)
-                with ui.VStack(spacing=2):
-                    ui.Spacer(height=6)
-                    ui.Label(f"Overall  \u2014  U-Net wins {unet_wins} of {len(fields)} fields",
-                             style={"font_size": FS_SECTION, "color": GREEN})
-                    tag = (f"and is faster on training hardware (GB10)"
-                           if latency_winner == "U-Net" else
-                           f"and {latency_winner or 'both'} lead on latency")
-                    ui.Label(tag, style={"font_size": FS_LABEL, "color": GRAY})
-
-    def _section_accuracy_table(self, fno, unet, current_field):
-        """Unified MAE + R² table, one row per field."""
-        ui.Label("Per-field accuracy  \u2014  192 test rooms on GB10",
-                 style={"font_size": FS_SECTION, "color": WHITE})
-
-        with ui.HStack(height=20):
-            ui.Label("  Field",          width=46, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("FNO MAE",          width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("U-Net MAE",        width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("FNO R\u00b2",       width=50, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("U-Net R\u00b2",     width=54, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("Win",              width=46, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-
-        unit_for = {"T": "\u00b0C", "Ux": "m/s", "Uy": "m/s", "Uz": "m/s", "p": "Pa"}
-        for fn in ["T", "Ux", "Uy", "Uz", "p"]:
-            f_mae = fno.get(fn, {}).get("MAE")
-            u_mae = unet.get(fn, {}).get("MAE")
-            f_r2  = fno.get(fn, {}).get("R2")
-            u_r2  = unet.get(fn, {}).get("R2")
-
-            winner = _winner_arrow(f_mae, u_mae, lower_is_better=True) if (f_mae is not None and u_mae is not None) else "?"
-            win_color = GREEN if winner == "U-Net" else ACCENT if winner == "FNO" else GRAY
-            is_current = (fn == current_field) or (fn in ("Ux", "Uy", "Uz") and current_field == "U_magnitude")
-            row_bg = 0xFF2F3A2F if is_current else 0x00000000  # subtle green-tinted highlight
-
-            with ui.ZStack(height=24):
-                ui.Rectangle(style={"background_color": row_bg, "border_radius": 3})
-                with ui.HStack():
-                    ui.Label(f"  {fn}",             width=46, style={"font_size": FS_BODY, "color": WHITE})
-                    ui.Label(self._fmt_mae(f_mae, unit_for[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
-                    ui.Label(self._fmt_mae(u_mae, unit_for[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": WHITE})
-                    ui.Label(self._fmt_r2(f_r2),    width=50, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": _r2_color(f_r2) if f_r2 is not None else GRAY})
-                    ui.Label(self._fmt_r2(u_r2),    width=54, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": _r2_color(u_r2) if u_r2 is not None else GRAY})
-                    ui.Label(winner,                 width=46, alignment=ui.Alignment.RIGHT, style={"font_size": FS_LABEL, "color": win_color})
-
-    def _section_deployment(self, fno, unet):
-        """Training-hardware vs this-laptop latency comparison."""
-        ui.Label("Deployment  \u2014  inference latency", style={"font_size": FS_SECTION, "color": WHITE})
-        with ui.HStack(height=20):
-            ui.Label("  Model",         width=76, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("Params",          width=60, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("GB10 paper",      width=78, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-            ui.Label("5080 measured",   width=96, alignment=ui.Alignment.RIGHT, style={"font_size": FS_CAPTION, "color": GRAY})
-
-        rows = [
-            ("FNO",    "28.3 M", fno.get("inference_ms"),  self._laptop_latency.get("fno")),
-            ("U-Net",  "22.6 M", unet.get("inference_ms"), self._laptop_latency.get("unet")),
-        ]
-        for name, params, gb10, laptop in rows:
-            with ui.HStack(height=22):
-                ui.Label(f"  {name}",                      width=76, style={"font_size": FS_BODY, "color": WHITE})
-                ui.Label(params,                             width=60, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
-                ui.Label(f"{gb10} ms" if gb10 is not None else "\u2013",
-                         width=78, alignment=ui.Alignment.RIGHT, style={"font_size": FS_BODY, "color": GRAY})
-                ui.Label(f"{laptop} ms" if laptop is not None else "\u2013",
-                         width=96, alignment=ui.Alignment.RIGHT,
-                         style={"font_size": FS_BODY, "color": ACCENT if laptop is not None else GRAY})
-
-    def _section_room_range(self, fno, unet, field):
-        """Compact current-field GT range for the selected room."""
-        sel = fno.get(field, fno.get("T", {})) or unet.get(field, unet.get("T", {}))
-        gt_r = sel.get("gt_range") if sel else None
-        if not gt_r or gt_r[0] == "?":
-            return
-        with ui.ZStack(height=28):
-            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
-            with ui.HStack():
-                ui.Spacer(width=10)
-                ui.Label(f"This room \u2014 GT {FIELD_LABELS[field]} range:",
-                         style={"font_size": FS_LABEL, "color": GRAY})
+                ui.Label(f"This room — GT {field_label} range:",
+                         style={"font_size": Font.LABEL, "color": Color.GRAY})
                 ui.Spacer(width=6)
-                ui.Label(f"[{gt_r[0]}, {gt_r[1]}] {FIELD_UNITS[field]}",
-                         style={"font_size": FS_BODY, "color": WHITE})
+                ui.Label(f"[{gt_r[0]}, {gt_r[1]}] {unit}",
+                         style={"font_size": Font.BODY, "color": Color.WHITE})
 
-    def _section_context_note(self):
-        """Bottom caption about data source + resolution."""
-        with ui.ZStack(height=52):
-            ui.Rectangle(style={"background_color": 0xFF242430, "border_radius": 6})
-            with ui.VStack(spacing=1):
-                ui.Spacer(height=6)
-                with ui.HStack():
-                    ui.Spacer(width=10)
-                    ui.Label("Full-resolution grid: 80 \u00d7 96 \u00d7 960 = 7.37 M points / room",
-                             style={"font_size": FS_CAPTION, "color": GRAY}, word_wrap=True)
-                with ui.HStack():
-                    ui.Spacer(width=10)
-                    ui.Label("Dataset: NVIDIA + Wistron PhysicsNeMo-Datacenter-CFD (Apache-2.0)",
-                             style={"font_size": FS_CAPTION, "color": GRAY}, word_wrap=True)
+    def _section_full_table(self, fno, unet, current_field):
+        """Full per-field accuracy table — collapsed by default; for committee questions."""
+        with ui.VStack(spacing=2):
+            with ui.HStack(height=20):
+                ui.Label("  Field",     width=46, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+                ui.Label("FNO MAE",     width=72, alignment=ui.Alignment.RIGHT, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+                ui.Label("U-Net MAE",   width=72, alignment=ui.Alignment.RIGHT, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+                ui.Label("FNO R²",  width=50, alignment=ui.Alignment.RIGHT, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+                ui.Label("U-Net R²", width=54, alignment=ui.Alignment.RIGHT, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+                ui.Label("Win",         width=46, alignment=ui.Alignment.RIGHT, style={"font_size": Font.CAPTION, "color": Color.GRAY})
+            for fn in ["T", "Ux", "Uy", "Uz", "p"]:
+                f_mae = fno.get(fn,  {}).get("MAE")
+                u_mae = unet.get(fn, {}).get("MAE")
+                f_r2  = fno.get(fn,  {}).get("R2")
+                u_r2  = unet.get(fn, {}).get("R2")
+                winner = _winner_arrow(f_mae, u_mae, lower_is_better=True) if (f_mae is not None and u_mae is not None) else "?"
+                win_color = Color.GREEN_PRIMARY if winner == "U-Net" else Color.GREEN_ACCENT if winner == "FNO" else Color.GRAY
+                is_current = (fn == current_field) or (fn in ("Ux", "Uy", "Uz") and current_field == "U_magnitude")
+                row_bg = Color.GREEN_ROW_HL if is_current else 0x00000000
+                with ui.ZStack(height=22):
+                    ui.Rectangle(style={"background_color": row_bg, "border_radius": 3})
+                    with ui.HStack():
+                        ui.Label(f"  {fn}",   width=46, style={"font_size": Font.BODY, "color": Color.WHITE})
+                        ui.Label(self._fmt_mae(f_mae, self._UNIT_FOR[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": Font.BODY, "color": Color.GRAY})
+                        ui.Label(self._fmt_mae(u_mae, self._UNIT_FOR[fn]), width=72, alignment=ui.Alignment.RIGHT, style={"font_size": Font.BODY, "color": Color.WHITE})
+                        ui.Label(self._fmt_r2(f_r2),  width=50, alignment=ui.Alignment.RIGHT, style={"font_size": Font.BODY, "color": _r2_color(f_r2) if f_r2 is not None else Color.GRAY})
+                        ui.Label(self._fmt_r2(u_r2),  width=54, alignment=ui.Alignment.RIGHT, style={"font_size": Font.BODY, "color": _r2_color(u_r2) if u_r2 is not None else Color.GRAY})
+                        ui.Label(winner,             width=46, alignment=ui.Alignment.RIGHT, style={"font_size": Font.LABEL, "color": win_color})
 
     # ------------------------------------------------------------------ format helpers
 
