@@ -487,109 +487,6 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         }},
     ]
 
-    def _parse_query(self, text):
-        """LLM parse first (if OPENAI_API_KEY present), regex fallback."""
-        if not (text or "").strip():
-            return None
-        llm = self._parse_query_llm(text)
-        if llm is not None:
-            return llm + ("llm",)
-        reg = self._parse_query_regex(text)
-        if reg is None:
-            return None
-        return reg + ("regex",)
-
-    def _parse_query_regex(self, text):
-        t = text.strip().lower()
-        op = "max"
-        if any(w in t for w in ("cold", "cool", "lowest", "minimum", "min", "chill")):
-            op = "min"
-        elif any(w in t for w in ("hot", "hottest", "highest", "peak", "warm", "max", "maximum", "spike", "worst", "largest")):
-            op = "max"
-        field = "T"
-        if any(w in t for w in ("press", "static", "pascal")):
-            field = "p"
-        elif any(w in t for w in ("wind", "airflow", "flow", "velocity", "vel ", "speed", "fast", "slow", "air ")):
-            field = "U_magnitude"
-        elif any(w in t for w in ("hot", "cold", "cool", "warm", "temp", "therm")):
-            field = "T"
-        return op, field
-
-    def _parse_query_llm(self, text):
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            return None
-        import urllib.request, urllib.error
-        body = {
-            "model": self._LLM_MODEL,
-            "messages": [
-                {"role": "system", "content":
-                    "You are a parser for questions about a datacenter CFD digital twin. "
-                    "Return strict JSON with two keys: "
-                    "'op' ('max' for hottest/highest/fastest/worst, 'min' for coldest/lowest/slowest), and "
-                    "'field' ('T' for temperature, 'U_magnitude' for airflow/velocity/speed, 'p' for pressure). "
-                    "If ambiguous, assume temperature. No other text."},
-                {"role": "user", "content": text},
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0,
-        }
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            data=json.dumps(body).encode(),
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=12) as r:
-                resp = json.load(r)
-            content = resp["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            op = parsed.get("op", "max")
-            field = parsed.get("field", "T")
-            if op not in ("max", "min"): op = "max"
-            if field not in ("T", "U_magnitude", "p"): field = "T"
-            return (op, field)
-        except Exception as e:
-            print(f"[dt.analytics] LLM parse failed ({type(e).__name__}: {e}) \u2014 using regex")
-            return None
-
-    def _llm_explain(self, question, op, field, value, world, unit, idx):
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            return None
-        import urllib.request
-        fields_pretty = {"T": "temperature", "U_magnitude": "airflow magnitude", "p": "pressure"}
-        msg = (
-            f"User asked: '{question}'. The surrogate identified the {('highest' if op == 'max' else 'lowest')} "
-            f"{fields_pretty[field]} in Room {idx} as {value:.2f} {unit} at world coordinates "
-            f"(X={world[0]:.2f}, Y={world[1]:.2f}, Z={world[2]:.2f}) meters. "
-            f"In this dataset, X is the length of the room (0-38.4 m), Y is the width (0-3.84 m), "
-            f"Z is the height (0-3.2 m). Rack inlets run along X."
-        )
-        body = {
-            "model": self._LLM_MODEL,
-            "messages": [
-                {"role": "system", "content":
-                    "You are a datacenter cooling engineer explaining a CFD surrogate result to a facility operator. "
-                    "Be specific, under 2 sentences, reference the coordinates where relevant. No markdown."},
-                {"role": "user", "content": msg},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 120,
-        }
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            data=json.dumps(body).encode(),
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                resp = json.load(r)
-            return resp["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            print(f"[dt.analytics] LLM explain failed: {e}")
-            return None
-
     def _compute_query(self, op, field, room=None):
         import numpy as np
         idx = self._current_sample if room is None else int(room)
@@ -651,30 +548,13 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         text = (text or "").strip()
         if not text:
             return
-        if os.environ.get("OPENAI_API_KEY"):
-            self._query_result_label.text = "Thinking\u2026"
-            answer, trace = self._run_agent(text)
-            trace_line = "  \u2192  ".join(trace) if trace else "no tools called"
-            self._query_result_label.text = f"{answer}\n\n[agent: {trace_line}]"
+        if not os.environ.get("OPENAI_API_KEY"):
+            self._query_result_label.text = "OpenAI API key required (set OPENAI_API_KEY)."
             return
-
-        # Fallback: no API key — use the old regex path
-        parsed = self._parse_query(text)
-        if parsed is None:
-            self._query_result_label.text = "Couldn't parse \u2014 try 'hottest spot' or 'fastest airflow'."
-            return
-        op, field, parser_tag = parsed
-        res = self._compute_query(op, field)
-        if res is None:
-            self._query_result_label.text = f"No data for {SAMPLE_LABELS.get(self._current_sample, '?')}"
-            return
-        value, world, unit, ind = res
-        self._mark_and_frame(world)
-        self._query_result_label.text = (
-            f"[{parser_tag}] {('highest' if op == 'max' else 'lowest')} "
-            f"{FIELD_LABELS[field]}: {value:.2f} {unit}  "
-            f"at (X={world[0]:.2f}, Y={world[1]:.2f}, Z={world[2]:.2f}) m"
-        )
+        self._query_result_label.text = "Thinking…"
+        answer, trace = self._run_agent(text)
+        trace_line = "  →  ".join(trace) if trace else "no tools called"
+        self._query_result_label.text = f"{answer}\n\n[agent: {trace_line}]"
 
     # ----------------------------------------------------------------- agent loop
 
@@ -1038,21 +918,6 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         if v is None:
             return "\u2013"
         return f"{v:.3f}"
-
-    def _card(self, title, rows):
-        with ui.ZStack(height=20 + len(rows) * 24 + (24 if title else 0)):
-            ui.Rectangle(style={"background_color": CARD_BG, "border_radius": 6})
-            with ui.VStack(spacing=2):
-                ui.Spacer(height=4)
-                if title:
-                    with ui.HStack():
-                        ui.Spacer(width=8)
-                        ui.Label(title, style={"font_size": 13, "color": WHITE})
-                for label, value, color in rows:
-                    with ui.HStack(height=22):
-                        ui.Spacer(width=12)
-                        ui.Label(label, width=100, style={"font_size": 12, "color": GRAY})
-                        ui.Label(str(value), style={"font_size": 13, "color": color})
 
     def _build_ui(self):
         with self._window.frame:
