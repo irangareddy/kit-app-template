@@ -273,39 +273,44 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         app = omni.kit.app.get_app()
 
         async def _deferred():
-            # Wait enough frames for references + RTX to ingest geometry
-            for _ in range(12):
-                await app.next_update_async()
+            # Async fire-and-forget would silently swallow exceptions in earlier
+            # versions; wrap so failures land in the boreas.operator log.
+            try:
+                # Wait enough frames for references + RTX to ingest geometry
+                for _ in range(12):
+                    await app.next_update_async()
 
-            # Measure bbox NOW (references should be resolved)
-            cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_], useExtentsHint=True)
-            bbox = Gf.BBox3d()
-            for path in user_roots:
-                prim = stage.GetPrimAtPath(path)
-                if prim:
-                    bbox = Gf.BBox3d.Combine(bbox, cache.ComputeWorldBound(prim))
-            r = bbox.ComputeAlignedRange()
+                # Measure bbox NOW (references should be resolved)
+                cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_], useExtentsHint=True)
+                bbox = Gf.BBox3d()
+                for path in user_roots:
+                    prim = stage.GetPrimAtPath(path)
+                    if prim:
+                        bbox = Gf.BBox3d.Combine(bbox, cache.ComputeWorldBound(prim))
+                r = bbox.ComputeAlignedRange()
 
-            if not r.IsEmpty():
-                try:
-                    from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
-                    frame_viewport_selection(get_active_viewport())
-                    logger.debug(f"_frame_all: framed via selection (bbox size={r.GetSize()})")
-                    return
-                except Exception as e:
-                    logger.warning(f"frame_viewport_selection failed: {e}")
+                if not r.IsEmpty():
+                    try:
+                        from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
+                        frame_viewport_selection(get_active_viewport())
+                        logger.debug(f"_frame_all: framed via selection (bbox size={r.GetSize()})")
+                        return
+                    except Exception as e:
+                        logger.warning(f"frame_viewport_selection failed: {e}")
 
-            # Fallback: hardcode a known-good camera pose for our fixed data layout.
-            # GT spans ~X 0-38, Y 0-4, Z 0-3.  Pred offset +50 in Y.
-            logger.debug("_frame_all: bbox still empty, using manual camera")
-            cam = stage.GetPrimAtPath("/OmniverseKit_Persp")
-            if cam:
-                api = UsdGeom.XformCommonAPI(cam)
-                # Eye position — isometric above +X +Y, looking at center (~19, 27, 1.5)
-                api.SetTranslate(Gf.Vec3d(-20.0, -25.0, 40.0))
-                # Rotation in degrees (X tilt, Y yaw, Z roll) that orients the default
-                # -Z camera forward toward the scene center
-                api.SetRotate(Gf.Vec3f(55.0, 0.0, -30.0))
+                # Fallback: hardcode a known-good camera pose for our fixed data layout.
+                # GT spans ~X 0-38, Y 0-4, Z 0-3.  Pred offset +50 in Y.
+                logger.debug("_frame_all: bbox still empty, using manual camera")
+                cam = stage.GetPrimAtPath("/OmniverseKit_Persp")
+                if cam:
+                    api = UsdGeom.XformCommonAPI(cam)
+                    # Eye position — isometric above +X +Y, looking at center (~19, 27, 1.5)
+                    api.SetTranslate(Gf.Vec3d(-20.0, -25.0, 40.0))
+                    # Rotation in degrees (X tilt, Y yaw, Z roll) that orients the default
+                    # -Z camera forward toward the scene center
+                    api.SetRotate(Gf.Vec3f(55.0, 0.0, -30.0))
+            except Exception:
+                logger.exception("_frame_all _deferred crashed")
 
         import asyncio
         asyncio.ensure_future(_deferred())
@@ -783,15 +788,20 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                         with ui.HStack(height=28, spacing=6):
                             self._query_field = ui.StringField(height=26)
                             self._query_field.model.set_value("where is the hottest spot?")
+
+                            def _submit_query(*_args):
+                                self._on_query(self._query_field.model.get_value_as_string())
+
+                            # Enter key in the StringField triggers Ask (no need to click).
+                            self._query_field.model.add_end_edit_fn(_submit_query)
+
                             btn_ask = ui.Button(
                                 "Ask",
                                 width=72,
                                 style={"background_color": GREEN, "color": WHITE,
                                        "font_size": FS_BODY, "border_radius": 6},
                             )
-                            btn_ask.set_clicked_fn(
-                                lambda: self._on_query(self._query_field.model.get_value_as_string())
-                            )
+                            btn_ask.set_clicked_fn(_submit_query)
                         self._query_result_label = ui.Label(
                             "Type a question and click Ask. The camera will frame the answer.",
                             style={"font_size": FS_LABEL, "color": GRAY},
