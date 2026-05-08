@@ -396,13 +396,36 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             return
         if not os.environ.get("OPENAI_API_KEY"):
             self._query_result_label.text = "OpenAI API key required (set OPENAI_API_KEY)."
+            self._query_result_label.set_style({"color": Color.RED, "font_size": Font.BODY})
             return
-        self._query_result_label.text = "Thinking…"
-        answer, trace = self._run_agent(text)
-        trace_line = "  →  ".join(trace) if trace else "no tools called"
-        self._query_result_label.text = f"{answer}\n\n[agent: {trace_line}]"
+        # Mark busy: clear old answer, show distinct loading state, disable Ask button.
+        # An asyncio yield lets Kit repaint these changes BEFORE the blocking agent call.
+        self._query_running = True
+        self._busy_query_text = text
+        self._query_result_label.text = f"⏳  Thinking…  ({text[:80]})"
+        self._query_result_label.set_style({"color": Color.YELLOW, "font_size": Font.BODY})
+        if hasattr(self, "_btn_ask"):
+            self._btn_ask.enabled = False
+        import asyncio, omni.kit.app
 
-    # ----------------------------------------------------------------- agent loop
+        async def _deferred_run():
+            try:
+                # Yield once so the busy state actually paints before the blocking call.
+                await omni.kit.app.get_app().next_update_async()
+                answer, trace = self._run_agent(self._busy_query_text)
+                trace_line = "  →  ".join(trace) if trace else "no tools called"
+                self._query_result_label.text = f"{answer}\n\n[agent: {trace_line}]"
+                self._query_result_label.set_style({"color": Color.WHITE, "font_size": Font.BODY})
+            except Exception:
+                logger.exception("agent run failed")
+                self._query_result_label.text = "Agent failed (see boreas.operator log)."
+                self._query_result_label.set_style({"color": Color.RED, "font_size": Font.BODY})
+            finally:
+                self._query_running = False
+                if hasattr(self, "_btn_ask"):
+                    self._btn_ask.enabled = True
+
+        asyncio.ensure_future(_deferred_run())
 
     def _run_agent(self, user_text):
         """Delegate to the Agent module. Returns (final_text, trace_list)."""
@@ -807,14 +830,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                             # Enter in the StringField triggers Ask.
                             self._query_field.model.add_end_edit_fn(_submit_query)
 
-                            btn_ask = ui.Button(
+                            self._btn_ask = ui.Button(
                                 "Ask",
                                 width=72,
                                 style={"background_color": GREEN, "color": WHITE,
                                        "font_size": FS_BODY, "border_radius": 6},
                                 tooltip="Send the question to the Boreas Operator Agent. Agent uses GPT-4o + 9 tools to query the surrogate, drive the viewport, and answer in operator voice with ASHRAE thresholds.",
                             )
-                            btn_ask.set_clicked_fn(_submit_query)
+                            self._btn_ask.set_clicked_fn(_submit_query)
 
                         # Sample questions — one click populates the field and submits.
                         # Each question exercises a different tool combination so the
