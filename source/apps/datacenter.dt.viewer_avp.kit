@@ -16,12 +16,10 @@ template_name = "omni.streaming_configuration"
 [dependencies]
 "datacenter.dt.viewer" = {}                        # Main application kit file
 "omni.kit.xr.bundle.apple_vision_pro" = {}         # AVP XR profile + Simulated XR
-# NOTE: "omni.kit.xr.cloudxr" is not yet published for Kit 110 — use Simulated XR
-# in the AR panel (no headset needed). When CloudXR lands on 110, re-enable below.
-#"omni.kit.xr.cloudxr" = {}
+"omni.kit.xr.cloudxr" = {}                         # CloudXR transport for AVP streaming (probe: re-enabled May 8 2026)
 
 [settings]
-# xr.openxr.preferNVOpaqueDataChannel = true      # Requires CloudXR (above)
+xr.openxr.preferNVOpaqueDataChannel = true         # NVIDIA-required for AVP CloudXR (per setup-sdk.html)
 rtx.verifyDriverVersion.enabled = false
 
 [settings.app]
