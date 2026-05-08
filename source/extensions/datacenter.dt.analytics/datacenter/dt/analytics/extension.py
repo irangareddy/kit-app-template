@@ -790,17 +790,20 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
                 ui.Spacer(height=4)
 
-                # Ask-the-Twin — natural-language query over the full-res target
+                # Ask the Twin — natural-language operator query over the surrogate.
+                # Empty input by default; sample buttons below populate-and-submit.
                 with ui.CollapsableFrame("Ask the Twin", height=0, collapsed=False):
                     with ui.VStack(spacing=6):
+
+                        # Query input + Ask button.
                         with ui.HStack(height=28, spacing=6):
                             self._query_field = ui.StringField(height=26)
-                            self._query_field.model.set_value("where is the hottest spot?")
+                            # Start empty — operator types or clicks a sample below.
 
                             def _submit_query(*_args):
                                 self._on_query(self._query_field.model.get_value_as_string())
 
-                            # Enter key in the StringField triggers Ask (no need to click).
+                            # Enter in the StringField triggers Ask.
                             self._query_field.model.add_end_edit_fn(_submit_query)
 
                             btn_ask = ui.Button(
@@ -808,20 +811,49 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                                 width=72,
                                 style={"background_color": GREEN, "color": WHITE,
                                        "font_size": FS_BODY, "border_radius": 6},
+                                tooltip="Send the question to the Boreas Operator Agent. Agent uses GPT-4o + 9 tools to query the surrogate, drive the viewport, and answer in operator voice with ASHRAE thresholds.",
                             )
                             btn_ask.set_clicked_fn(_submit_query)
+
+                        # Sample questions — one click populates the field and submits.
+                        # Each question exercises a different tool combination so the
+                        # demo can cover the agent surface in 5 clicks.
+                        SAMPLE_QUERIES = [
+                            "Where is the hottest spot in room 0 and what should I do?",
+                            "Among rooms 0, 1, and 2, which has the most thermal stress?",
+                            "Compare FNO and U-Net temperature accuracy across the test set.",
+                            "What is the airflow distribution in room 1? Is it adequate?",
+                            "Recommend immediate cooling actions for the current hotspot.",
+                        ]
+
+                        def _make_sample_runner(text):
+                            def _run(*_args):
+                                self._query_field.model.set_value(text)
+                                self._on_query(text)
+                            return _run
+
+                        for sample in SAMPLE_QUERIES:
+                            btn = ui.Button(
+                                sample,
+                                height=24,
+                                style={"background_color": Color.SECONDARY,
+                                       "color": Color.WHITE,
+                                       "font_size": Font.LABEL,
+                                       "border_radius": 4,
+                                       "padding": 4},
+                                tooltip="Click to send this question to the agent.",
+                            )
+                            btn.set_clicked_fn(_make_sample_runner(sample))
+
+                        ui.Spacer(height=2)
+
+                        # Answer area — empty at startup, fills with agent response.
                         self._query_result_label = ui.Label(
-                            "Type a question and click Ask. The camera will frame the answer.",
-                            style={"font_size": FS_LABEL, "color": GRAY},
+                            "",
+                            style={"font_size": FS_BODY, "color": WHITE},
                             word_wrap=True,
                             height=0,
                         )
-                        with ui.HStack(height=18, spacing=0):
-                            ui.Label("Try:", width=30, style={"font_size": FS_CAPTION, "color": GRAY})
-                            ui.Label("'hottest spot'  \u00b7  'coldest aisle'  \u00b7  "
-                                    "'fastest airflow'  \u00b7  'highest pressure'",
-                                    style={"font_size": FS_CAPTION, "color": GRAY},
-                                    word_wrap=True)
 
                 ui.Spacer(height=4)
 
