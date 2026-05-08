@@ -19,6 +19,7 @@ from .config import (
     FIELDS, FIELD_LABELS, FIELD_UNITS,
     SIDE_BY_SIDE_OFFSET,
 )
+from .agent import Agent
 from .denormalize import denormalize_field
 from .view_state import ViewState
 from .prompts import LLM_MODEL, AGENT_MAX_STEPS, SYSTEM_PROMPT, TOOL_SCHEMAS
