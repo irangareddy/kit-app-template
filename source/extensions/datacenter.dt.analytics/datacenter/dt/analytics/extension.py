@@ -397,8 +397,11 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         "implications (cooling adequacy, hotspot risk, airflow patterns, pressure imbalance); recommend "
         "immediate / long-term / monitoring actions when warranted; comment on which surrogate to trust "
         "for the field at hand on model-comparison questions.\n\n"
-        "4. Multi-step reasoning is encouraged. For comparative questions across rooms, call tools "
-        "across all three rooms before concluding.\n\n"
+        "4. Multi-step reasoning is encouraged. For comparative questions across rooms, call "
+        "find_extremum / get_room_stats with an explicit 'room' parameter (0, 1, or 2) for each "
+        "room — do NOT call set_room repeatedly before queries (set_room only changes the visible "
+        "viewport scene; it is not required for query tools and batching set_rooms before queries "
+        "leads to all queries hitting the last set room).\n\n"
         "Voice: precise, calm, actionable \u2014 a senior thermal engineer briefing a facility operator "
         "who needs to act on what you say."
     )
@@ -433,20 +436,29 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         }},
         {"type": "function", "function": {
             "name": "find_extremum",
-            "description": "Find the highest ('max') or lowest ('min') value of a field in the current "
-                           "room at full resolution, returning value + world coordinates.",
+            "description": "Find the highest ('max') or lowest ('min') value of a field at full resolution, "
+                           "returning value + world coordinates. By default queries the currently active "
+                           "room; pass 'room' (0, 1, or 2) to query a specific room WITHOUT changing the "
+                           "viewport. Use this for cross-room comparisons — pass 'room' explicitly each "
+                           "call instead of calling set_room first.",
             "parameters": {"type": "object",
                            "properties": {"op": {"type": "string", "enum": ["max", "min"]},
                                           "field": {"type": "string",
-                                                    "enum": ["T", "U_magnitude", "p"]}},
+                                                    "enum": ["T", "U_magnitude", "p"]},
+                                          "room": {"type": "integer", "enum": [0, 1, 2],
+                                                   "description": "Optional. If omitted, uses the currently active room."}},
                            "required": ["op", "field"]},
         }},
         {"type": "function", "function": {
             "name": "get_room_stats",
-            "description": "Return min, max, mean, std of a field in the current room (physical units).",
+            "description": "Return min, max, mean, std of a field in physical units. By default queries "
+                           "the currently active room; pass 'room' (0, 1, or 2) to query a specific room "
+                           "WITHOUT changing the viewport. Use this for cross-room comparisons.",
             "parameters": {"type": "object",
                            "properties": {"field": {"type": "string",
-                                                    "enum": ["T", "U_magnitude", "p"]}},
+                                                    "enum": ["T", "U_magnitude", "p"]},
+                                          "room": {"type": "integer", "enum": [0, 1, 2],
+                                                   "description": "Optional. If omitted, uses the currently active room."}},
                            "required": ["field"]},
         }},
         {"type": "function", "function": {
@@ -578,9 +590,9 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             print(f"[dt.analytics] LLM explain failed: {e}")
             return None
 
-    def _compute_query(self, op, field):
+    def _compute_query(self, op, field, room=None):
         import numpy as np
-        idx = self._current_sample
+        idx = self._current_sample if room is None else int(room)
         target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
         if not target_path.exists():
             return None
@@ -730,8 +742,8 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             "set_room":              lambda: self._tool_set_room(args.get("room", 0)),
             "set_field":             lambda: self._tool_set_field(args.get("field", "T")),
             "set_surrogate":         lambda: self._tool_set_surrogate(args.get("model", "unet")),
-            "find_extremum":         lambda: self._tool_find_extremum(args.get("op", "max"), args.get("field", "T")),
-            "get_room_stats":        lambda: self._tool_get_room_stats(args.get("field", "T")),
+            "find_extremum":         lambda: self._tool_find_extremum(args.get("op", "max"), args.get("field", "T"), args.get("room")),
+            "get_room_stats":        lambda: self._tool_get_room_stats(args.get("field", "T"), args.get("room")),
             "get_model_comparison":  lambda: self._tool_get_model_comparison(args.get("field")),
             "frame_camera":          lambda: self._tool_frame_camera(args.get("x", 0), args.get("y", 0), args.get("z", 0), args.get("label")),
             "load_scene":            lambda: self._tool_load_scene(),
@@ -771,22 +783,27 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         self._current_model = f"{model}_pred"
         return {"ok": True, "model": model}
 
-    def _tool_find_extremum(self, op, field):
-        res = self._compute_query(op, field)
+    def _tool_find_extremum(self, op, field, room=None):
+        idx = self._current_sample if room is None else int(room)
+        if idx not in SAMPLES:
+            return {"error": f"room must be one of {SAMPLES}"}
+        res = self._compute_query(op, field, room=idx)
         if res is None:
-            return {"error": "target data missing for this room"}
+            return {"error": f"target data missing for room {idx}"}
         value, world, unit, ind = res
         return {
             "op": op, "field": field,
             "value": round(value, 3), "unit": unit,
             "world_xyz_m": [round(v, 3) for v in world],
             "grid_index_zyx": [int(ind[0]), int(ind[1]), int(ind[2])],
-            "room": self._current_sample,
+            "room": idx,
         }
 
-    def _tool_get_room_stats(self, field):
+    def _tool_get_room_stats(self, field, room=None):
         import numpy as np
-        idx = self._current_sample
+        idx = self._current_sample if room is None else int(room)
+        if idx not in SAMPLES:
+            return {"error": f"room must be one of {SAMPLES}"}
         target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
         if not target_path.exists():
             return {"error": "target not on disk"}
