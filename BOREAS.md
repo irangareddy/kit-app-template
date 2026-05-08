@@ -93,6 +93,110 @@ Defaults assume the Boreas repo at `C:/Users/Ranga/298AB-dt-viewer`.
 
 ---
 
+## Apple Vision Pro CloudXR streaming setup
+
+The `datacenter.dt.viewer_avp` variant streams the Boreas Operator viewport to an Apple Vision Pro headset over LAN via NVIDIA CloudXR. This section covers the pieces you need on the **server (Windows)**, the **client (Vision Pro via Macbook + Xcode)**, and the **network in between**.
+
+### Server prerequisites (Windows)
+
+NVIDIA's recommended spec (from `setup-network.html` / `requirements.html`):
+
+- 2× NVIDIA RTX 6000 Ada 48 GB (Vision Pro) or 1× RTX 6000 Ada 48 GB (iPad)
+- 128 GB RAM
+- 16-core CPU (Threadripper Pro 5955WX class)
+- Driver 553.62 or newer
+- Kit SDK 107.3+
+
+This Boreas fork is on **Kit 110.1.0** with `omni.kit.xr.cloudxr-6.0.5` (verified working as of May 2026). It is known to run on a single RTX 5080 Laptop (16 GB) at reduced frame rate / quality compared to the spec hardware. Treat NVIDIA's spec as a target, not a hard floor.
+
+### Server step 1 — confirm the AVP variant builds with CloudXR enabled
+
+```powershell
+cd C:\Users\Ranga\omniverse\kit-app-template
+.\repo.bat build
+```
+
+The build should resolve `omni.kit.xr.cloudxr` (currently 6.0.5) and the `omni.kit.xr.bundle.apple_vision_pro` extension (currently 109.0.0). If either fails, NVIDIA may have shipped a breaking change — check `source/apps/datacenter.dt.viewer_avp.kit` against NVIDIA's `setup-sdk.html`.
+
+### Server step 2 — open the firewall ports
+
+CloudXR uses one TCP port (connect channel) and several UDP ports (video, input, audio). Run **as Administrator** (the script is in this fork):
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\setup-avp-firewall.ps1
+```
+
+Removal:
+```powershell
+Get-NetFirewallRule -DisplayName "Boreas AVP CloudXR*" | Remove-NetFirewallRule
+```
+
+The rules are scoped to `kit.exe` so they don't permanently widen the firewall.
+
+### Server step 3 — launch + start streaming
+
+```powershell
+_build\windows-x86_64\release\datacenter.dt.viewer_avp.bat
+```
+
+In the Kit window: **Window → AR** → select **Apple Vision Pro** profile → click **Start Streaming**. The Kit log will show the server-side IP + ports the client connects to.
+
+### Client setup (Macbook + Xcode + Apple Developer account)
+
+The Vision Pro client is NVIDIA's [`apple-configurator-sample`](https://github.com/NVIDIA-Omniverse/apple-configurator-sample). Required:
+
+- Macbook with **Xcode 16.2+** on macOS Sonoma 14.4+
+- **Paid Apple Developer enrollment** ($99/year) — free Apple IDs cannot deploy to physical Vision Pro
+- An Apple Vision Pro on visionOS 2.0+
+
+Build + sideload:
+
+```bash
+git clone git@github.com:NVIDIA-Omniverse/apple-configurator-sample.git
+cd apple-configurator-sample
+open Configurator.xcodeproj
+```
+
+In Xcode → **Configurator** target → **Signing & Capabilities**:
+1. Set **Team** to your paid Apple Developer team
+2. Change **Bundle Identifier** to a unique value (e.g., `com.<you>.boreas-avp-client`)
+3. Plug in or pair the Vision Pro; pick it as the destination in **Product → Destination**
+4. Press **Product → Run** (⌘R) — Xcode builds, signs, and installs
+5. On the Vision Pro: **Settings → General → VPN & Device Management** → trust the developer certificate
+6. The **Configurator** icon appears in the Vision Pro home screen
+
+Pin to a known-good commit of the sample once you have it building, so a future NVIDIA update doesn't break your setup unannounced.
+
+### Network requirements (the part that breaks demos)
+
+NVIDIA's `setup-network.html` is unforgiving on this:
+
+- Both server and client on the **same physical Wi-Fi network**, in the **same room with line of sight**
+- **5 GHz or 6 GHz only** (channels 44 or 149 with 80 MHz preferred)
+- **Recommended downstream:** 200 Mbps (minimum 100 Mbps); 1000 Mbps NIC on server
+- **Latency:** 30 ms recommended, 100 ms maximum (pose-to-frame)
+- **No public / guest / corporate Wi-Fi.** Guest networks (`SJSU_guest`, `eduroam`, hotel Wi-Fi) almost always have **client isolation** enabled — the firewall rules above mean nothing if the network blocks intra-client traffic. **Use a private LAN: home router, mobile hotspot, or travel router.**
+
+Quick test from the laptop: `ping <vision-pro-ip>`. If ping doesn't work, no amount of firewall config will help — the network is isolating you.
+
+### Verification checklist
+
+| # | Check | Pass = |
+|---|---|---|
+| 1 | Server starts CloudXR | Kit log shows `[ext: omni.kit.xr.cloudxr-6.0.5+...] startup` |
+| 2 | Server visible on LAN | `ping` between server and Vision Pro succeeds |
+| 3 | First connection succeeds | Stereo render appears in the headset within 30 s of tapping Connect |
+| 4 | Frame rate is acceptable | ≥ 60 Hz on RTX 5080 (NVIDIA target 90 Hz on spec hardware) |
+| 5 | Round-trip latency tolerable | Pinch responds within ~150 ms (NVIDIA target 80 ms) |
+| 6 | Boreas Operator panel still works | Server-side click on a sample question → agent runs → red marker visible in the streamed scene |
+| 7 | Reconnect works | Disconnecting + reconnecting from the headset doesn't crash the server |
+
+### Fallback: Simulated XR (no headset, no network)
+
+If CloudXR isn't available (NVIDIA registry hiccup, network won't cooperate, hardware can't keep up), the same AVP `.kit` ships **Simulated XR**: open the AR panel → pick the Simulated XR profile → stereo render appears inside a desktop window. The operator agent + viewport still work; you just don't get the headset experience.
+
+---
+
 ## Pulling NVIDIA upstream updates
 
 Standard fork pattern. `origin` is this fork; `upstream` is NVIDIA:
