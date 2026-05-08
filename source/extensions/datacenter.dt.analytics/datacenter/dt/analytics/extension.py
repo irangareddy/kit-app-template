@@ -21,6 +21,7 @@ from .config import (
 )
 from .denormalize import denormalize_field
 from .view_state import ViewState
+from .prompts import LLM_MODEL, AGENT_MAX_STEPS, SYSTEM_PROMPT, TOOL_SCHEMAS
 from .log import logger
 from .theme import (
     Color, Font,
@@ -330,121 +331,10 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     _SPACING_M = 0.04  # grid spacing in meters (matches generate_assets.SPACING)
 
-    _LLM_MODEL = "gpt-4o"
-    _AGENT_MAX_STEPS = 10
-
-    _AGENT_SYSTEM_PROMPT = (
-        "You are the Boreas Operator Agent \u2014 an AI thermal engineer embedded in a 3D Omniverse Kit "
-        "viewer of a datacenter Digital Twin. You have direct control over the viewport (room, field, "
-        "surrogate, camera) and access to full-resolution CFD predictions for three datacenter rooms "
-        "(0, 1, 2).\n\n"
-        "Available data: three rooms each with full-resolution CFD predictions for T (\u00b0C), U_magnitude "
-        "(m/s), and p (Pa). Two neural-operator surrogates are available: FNO (28.3M params) and U-Net "
-        "(22.6M params, the production-recommended model). World axes: X = length (0-38.4 m), Y = width "
-        "(0-3.84 m), Z = height (0-3.2 m), grid spacing 0.04 m. Aggregate metrics across 192 held-out "
-        "test rooms are available for FNO vs U-Net comparison.\n\n"
-        "For every operator question, behave as a thermal engineer briefing the facility operator:\n\n"
-        "1. Investigate first. Use tools to check the current view, navigate to the relevant room or "
-        "field, find extrema, and pull statistics before answering. Never invent numbers \u2014 every "
-        "numerical claim must come from a tool call.\n\n"
-        "2. Show, don't just tell. When you identify a hotspot or anomaly, use frame_camera to drop a "
-        "marker and frame the viewport on the location so the operator sees what you are talking about. "
-        "After set_room / set_field / set_surrogate, call load_scene so the change is visible.\n\n"
-        "3. Answer in operator-engineer voice: cite the quantitative answer with units and world "
-        "coordinates; compare against datacenter standards (ASHRAE A1 hot-aisle envelope 18-27 \u00b0C, "
-        "rack-inlet control tolerance \u00b11 \u00b0C, CRAC delta-T 10-15 \u00b0C); explain operational "
-        "implications (cooling adequacy, hotspot risk, airflow patterns, pressure imbalance); recommend "
-        "immediate / long-term / monitoring actions when warranted; comment on which surrogate to trust "
-        "for the field at hand on model-comparison questions.\n\n"
-        "4. Multi-step reasoning is encouraged. For comparative questions across rooms, call "
-        "find_extremum / get_room_stats with an explicit 'room' parameter (0, 1, or 2) for each "
-        "room — do NOT call set_room repeatedly before queries (set_room only changes the visible "
-        "viewport scene; it is not required for query tools and batching set_rooms before queries "
-        "leads to all queries hitting the last set room).\n\n"
-        "Voice: precise, calm, actionable \u2014 a senior thermal engineer briefing a facility operator "
-        "who needs to act on what you say."
-    )
-
-    _AGENT_TOOLS = [
-        {"type": "function", "function": {
-            "name": "describe_current_view",
-            "description": "Report the room, field, surrogate, and mode currently rendered in the viewer.",
-            "parameters": {"type": "object", "properties": {}},
-        }},
-        {"type": "function", "function": {
-            "name": "set_room",
-            "description": "Switch the active datacenter room (0, 1, or 2). Reloads the scene.",
-            "parameters": {"type": "object",
-                           "properties": {"room": {"type": "integer", "enum": [0, 1, 2]}},
-                           "required": ["room"]},
-        }},
-        {"type": "function", "function": {
-            "name": "set_field",
-            "description": "Switch which CFD field is visualized.",
-            "parameters": {"type": "object",
-                           "properties": {"field": {"type": "string",
-                                                    "enum": ["T", "U_magnitude", "p"]}},
-                           "required": ["field"]},
-        }},
-        {"type": "function", "function": {
-            "name": "set_surrogate",
-            "description": "Pick the surrogate model for comparison ('fno' or 'unet').",
-            "parameters": {"type": "object",
-                           "properties": {"model": {"type": "string", "enum": ["fno", "unet"]}},
-                           "required": ["model"]},
-        }},
-        {"type": "function", "function": {
-            "name": "find_extremum",
-            "description": "Find the highest ('max') or lowest ('min') value of a field at full resolution, "
-                           "returning value + world coordinates. By default queries the currently active "
-                           "room; pass 'room' (0, 1, or 2) to query a specific room WITHOUT changing the "
-                           "viewport. Use this for cross-room comparisons — pass 'room' explicitly each "
-                           "call instead of calling set_room first.",
-            "parameters": {"type": "object",
-                           "properties": {"op": {"type": "string", "enum": ["max", "min"]},
-                                          "field": {"type": "string",
-                                                    "enum": ["T", "U_magnitude", "p"]},
-                                          "room": {"type": "integer", "enum": [0, 1, 2],
-                                                   "description": "Optional. If omitted, uses the currently active room."}},
-                           "required": ["op", "field"]},
-        }},
-        {"type": "function", "function": {
-            "name": "get_room_stats",
-            "description": "Return min, max, mean, std of a field in physical units. By default queries "
-                           "the currently active room; pass 'room' (0, 1, or 2) to query a specific room "
-                           "WITHOUT changing the viewport. Use this for cross-room comparisons.",
-            "parameters": {"type": "object",
-                           "properties": {"field": {"type": "string",
-                                                    "enum": ["T", "U_magnitude", "p"]},
-                                          "room": {"type": "integer", "enum": [0, 1, 2],
-                                                   "description": "Optional. If omitted, uses the currently active room."}},
-                           "required": ["field"]},
-        }},
-        {"type": "function", "function": {
-            "name": "get_model_comparison",
-            "description": "Get aggregate MAE / R\u00b2 / latency for FNO vs U-Net across 192 test rooms, "
-                           "optionally filtered to a specific field.",
-            "parameters": {"type": "object",
-                           "properties": {"field": {"type": "string",
-                                                    "enum": ["T", "Ux", "Uy", "Uz", "p"]}}},
-        }},
-        {"type": "function", "function": {
-            "name": "frame_camera",
-            "description": "Place a red marker at a world point (meters) and frame the viewport camera on it.",
-            "parameters": {"type": "object",
-                           "properties": {"x": {"type": "number"},
-                                          "y": {"type": "number"},
-                                          "z": {"type": "number"},
-                                          "label": {"type": "string"}},
-                           "required": ["x", "y", "z"]},
-        }},
-        {"type": "function", "function": {
-            "name": "load_scene",
-            "description": "Re-load the viewer with the current Room/Surrogate/Field/Mode selections. "
-                           "Use after set_room / set_field / set_surrogate so the user sees the change.",
-            "parameters": {"type": "object", "properties": {}},
-        }},
-    ]
+    _LLM_MODEL = LLM_MODEL
+    _AGENT_MAX_STEPS = AGENT_MAX_STEPS
+    _AGENT_SYSTEM_PROMPT = SYSTEM_PROMPT
+    _AGENT_TOOLS = TOOL_SCHEMAS
 
     def _compute_query(self, op, field, room=None):
         import numpy as np
