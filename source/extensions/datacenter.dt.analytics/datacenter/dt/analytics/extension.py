@@ -20,6 +20,7 @@ from .config import (
     SIDE_BY_SIDE_OFFSET,
 )
 from .denormalize import denormalize_field
+from .view_state import ViewState
 from .log import logger
 from .theme import (
     Color, Font,
@@ -66,12 +67,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             logger.debug(f"dock setup skipped: {e}")
         self._window.visible = True
         logger.debug(f"window '{self.WINDOW_TITLE}' created, visible={self._window.visible}")
-        self._current_sample = 0
-        self._current_model = "fno_pred"
-        self._current_field = "T"
-        self._comparison_mode = True
-        self._show_error = False
-        self._show_isosurface = False
+        self.state = ViewState()
         self._metrics = {}
         self._laptop_latency = {}  # measured on this 5080 — filled by _load_metrics
         self._load_metrics()
@@ -153,22 +149,22 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
     def _load_single(self, model, field, is_error=False, is_iso=False):
         if is_error:
             tag = "fno" if model == "fno_pred" else "unet"
-            fname = f"sample{self._current_sample}_{tag}_error_{field}.usdc"
+            fname = f"sample{self.state.sample}_{tag}_error_{field}.usdc"
         elif is_iso:
-            fname = f"sample{self._current_sample}_{model}_T_iso.usdc"
+            fname = f"sample{self.state.sample}_{model}_T_iso.usdc"
         else:
-            fname = f"sample{self._current_sample}_{model}_{field}.usdc"
+            fname = f"sample{self.state.sample}_{model}_{field}.usdc"
         return USD_DIR / fname
 
     def _load_comparison_scene(self):
         """Load GT and prediction side-by-side in a single USD stage."""
-        field = self._current_field
-        model = self._current_model
-        idx = self._current_sample
+        field = self.state.field
+        model = self.state.model
+        idx = self.state.sample
 
         gt_path = self._load_single("ground_truth", field)
         pred_path = self._load_single(model, field)
-        err_path = self._load_single(model, field, is_error=True) if self._show_error else None
+        err_path = self._load_single(model, field, is_error=True) if self.state.show_error else None
 
         logger.debug(f"_load_comparison_scene sample={idx} field={field} model={model}")
         logger.debug(f"GT   : {gt_path}  exists={gt_path.exists()}")
@@ -180,7 +176,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             return
 
         try:
-            err_tag = "_err" if (self._show_error and err_path and err_path.exists()) else ""
+            err_tag = "_err" if (self.state.show_error and err_path and err_path.exists()) else ""
             compose_path = USD_DIR / f"_compose_s{idx}_{model}_{field}{err_tag}.usda"
             # Build in-memory to avoid USD's layer registry collision, then Export.
             stage = Usd.Stage.CreateInMemory()
@@ -201,7 +197,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             pred_xf.GetPrim().GetReferences().AddReference(pred_ref)
             pred_xf.AddTranslateOp().Set(Gf.Vec3d(0, SIDE_BY_SIDE_OFFSET, 0))
 
-            if self._show_error and err_path and err_path.exists():
+            if self.state.show_error and err_path and err_path.exists():
                 err_xf = UsdGeom.Xform.Define(stage, "/DatacenterComparison/ErrorMap")
                 err_xf.GetPrim().GetReferences().AddReference(err_path.as_posix())
                 err_xf.AddTranslateOp().Set(Gf.Vec3d(0, SIDE_BY_SIDE_OFFSET * 2, 0))
@@ -220,12 +216,12 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _load_single_scene(self):
         """Load a single USD file."""
-        if self._show_isosurface:
-            path = self._load_single(self._current_model, "T", is_iso=True)
-        elif self._show_error:
-            path = self._load_single(self._current_model, self._current_field, is_error=True)
+        if self.state.show_isosurface:
+            path = self._load_single(self.state.model, "T", is_iso=True)
+        elif self.state.show_error:
+            path = self._load_single(self.state.model, self.state.field, is_error=True)
         else:
-            path = self._load_single(self._current_model, self._current_field)
+            path = self._load_single(self.state.model, self.state.field)
 
         logger.debug(f"_load_single_scene -> {path}  exists={path.exists()}")
         if path.exists():
@@ -238,7 +234,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
     def _load_gt_only(self):
         """Load ground truth only."""
         self._ensure_generated()
-        path = self._load_single("ground_truth", self._current_field)
+        path = self._load_single("ground_truth", self.state.field)
         if path.exists():
             omni.usd.get_context().open_stage(str(path))
             self._frame_all()
@@ -315,17 +311,17 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _on_load(self):
         logger.debug("========== LOAD SCENE ==========")
-        logger.debug(f"sample       = {self._current_sample} ({SAMPLE_LABELS.get(self._current_sample)})")
-        logger.debug(f"field        = {self._current_field}")
-        logger.debug(f"model        = {self._current_model}")
-        logger.debug(f"comparison   = {self._comparison_mode}")
-        logger.warning(f"show_error   = {self._show_error}")
-        logger.debug(f"isosurface   = {self._show_isosurface}")
+        logger.debug(f"sample       = {self.state.sample} ({SAMPLE_LABELS.get(self.state.sample)})")
+        logger.debug(f"field        = {self.state.field}")
+        logger.debug(f"model        = {self.state.model}")
+        logger.debug(f"comparison   = {self.state.comparison_mode}")
+        logger.warning(f"show_error   = {self.state.show_error}")
+        logger.debug(f"isosurface   = {self.state.show_isosurface}")
         logger.debug(f"USD_DIR      = {USD_DIR}")
         logger.debug(f"RAW_DATA_DIR = {RAW_DATA_DIR}")
         logger.debug(f"OPENAI_API_KEY set = {bool(os.environ.get('OPENAI_API_KEY'))}")
         self._ensure_generated()
-        if self._comparison_mode:
+        if self.state.comparison_mode:
             self._load_comparison_scene()
         else:
             self._load_single_scene()
@@ -452,7 +448,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _compute_query(self, op, field, room=None):
         import numpy as np
-        idx = self._current_sample if room is None else int(room)
+        idx = self.state.sample if room is None else int(room)
         target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
         if not target_path.exists():
             return None
@@ -591,34 +587,34 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _tool_describe_current_view(self):
         return {
-            "room": self._current_sample,
-            "room_label": SAMPLE_LABELS.get(self._current_sample, f"Sample {self._current_sample}"),
-            "field": self._current_field,
-            "surrogate": "unet" if self._current_model == "unet_pred" else "fno",
-            "comparison_mode": self._comparison_mode,
-            "show_error_map": self._show_error,
+            "room": self.state.sample,
+            "room_label": SAMPLE_LABELS.get(self.state.sample, f"Sample {self.state.sample}"),
+            "field": self.state.field,
+            "surrogate": "unet" if self.state.model == "unet_pred" else "fno",
+            "comparison_mode": self.state.comparison_mode,
+            "show_error_map": self.state.show_error,
         }
 
     def _tool_set_room(self, room):
         if room not in SAMPLES:
             return {"error": f"room must be one of {SAMPLES}"}
-        self._current_sample = int(room)
-        return {"ok": True, "room": self._current_sample}
+        self.state.sample = int(room)
+        return {"ok": True, "room": self.state.sample}
 
     def _tool_set_field(self, field):
         if field not in FIELDS:
             return {"error": f"field must be one of {FIELDS}"}
-        self._current_field = field
+        self.state.field = field
         return {"ok": True, "field": field}
 
     def _tool_set_surrogate(self, model):
         if model not in ("fno", "unet"):
             return {"error": "model must be 'fno' or 'unet'"}
-        self._current_model = f"{model}_pred"
+        self.state.model = f"{model}_pred"
         return {"ok": True, "model": model}
 
     def _tool_find_extremum(self, op, field, room=None):
-        idx = self._current_sample if room is None else int(room)
+        idx = self.state.sample if room is None else int(room)
         if idx not in SAMPLES:
             return {"error": f"room must be one of {SAMPLES}"}
         res = self._compute_query(op, field, room=idx)
@@ -635,7 +631,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _tool_get_room_stats(self, field, room=None):
         import numpy as np
-        idx = self._current_sample if room is None else int(room)
+        idx = self.state.sample if room is None else int(room)
         if idx not in SAMPLES:
             return {"error": f"room must be one of {SAMPLES}"}
         target_path = RAW_DATA_DIR / "targets" / f"sample_{idx:04d}.npy"
@@ -652,7 +648,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         }
 
     def _tool_get_model_comparison(self, field=None):
-        idx = self._current_sample
+        idx = self.state.sample
         m = self._metrics.get(idx)
         if not m:
             return {"error": "no metrics loaded"}
@@ -675,7 +671,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _tool_load_scene(self):
         self._ensure_generated()
-        if self._comparison_mode:
+        if self.state.comparison_mode:
             self._load_comparison_scene()
         else:
             self._load_single_scene()
@@ -684,9 +680,9 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
     def _rebuild_metrics_panel(self):
         """Unified, scannable metrics view."""
         self._metrics_frame.clear()
-        idx = self._current_sample
-        field = self._current_field
-        model = self._current_model
+        idx = self.state.sample
+        field = self.state.field
+        model = self.state.model
 
         with self._metrics_frame:
             with ui.VStack(spacing=10):
@@ -711,10 +707,10 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _section_view_header(self, idx, field, model):
         """Compact current-view strip."""
-        mode = "Side-by-Side" if self._comparison_mode else "Single"
-        if self._show_error:
+        mode = "Side-by-Side" if self.state.comparison_mode else "Single"
+        if self.state.show_error:
             mode += " + Error"
-        if self._show_isosurface:
+        if self.state.show_isosurface:
             mode = "Isosurface"
 
         with ui.ZStack(height=52):
@@ -730,7 +726,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                     )
                 with ui.HStack():
                     ui.Spacer(width=10)
-                    if self._comparison_mode:
+                    if self.state.comparison_mode:
                         sub = f"Left: Ground Truth (OpenFOAM)    Right: {MODEL_SHORT[model]} prediction"
                     else:
                         sub = f"Showing: {MODEL_SHORT.get(model, 'Ground Truth')}"
@@ -981,14 +977,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
     def _set(self, key, value):
         if key == "sample":
-            self._current_sample = SAMPLES[value]
+            self.state.sample = SAMPLES[value]
         elif key == "model":
-            self._current_model = MODELS[value]
+            self.state.model = MODELS[value]
         elif key == "field":
-            self._current_field = FIELDS[value]
+            self.state.field = FIELDS[value]
         elif key == "compare":
-            self._comparison_mode = value
+            self.state.comparison_mode = value
         elif key == "error":
-            self._show_error = value
+            self.state.show_error = value
         elif key == "iso":
-            self._show_isosurface = value
+            self.state.show_isosurface = value
