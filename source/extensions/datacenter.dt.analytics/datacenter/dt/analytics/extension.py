@@ -399,60 +399,13 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
     # ----------------------------------------------------------------- agent loop
 
     def _run_agent(self, user_text):
-        """Tool-calling loop over OpenAI. Returns (final_text, trace_list)."""
-        messages = [
-            {"role": "system", "content": self._AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content":
-                f"Current view: {json.dumps(self._tool_describe_current_view())}\n"
-                f"User question: {user_text}"},
-        ]
-        trace = []
-        for step in range(self._AGENT_MAX_STEPS):
-            resp = self._openai_chat(messages, tools=self._AGENT_TOOLS)
-            if resp is None:
-                return "OpenAI call failed.", trace
-            msg = resp["choices"][0]["message"]
-            tool_calls = msg.get("tool_calls") or []
-            messages.append({"role": "assistant",
-                             "content": msg.get("content") or "",
-                             "tool_calls": tool_calls})
-            if not tool_calls:
-                return (msg.get("content") or "(no answer)"), trace
-            for tc in tool_calls:
-                name = tc["function"]["name"]
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                trace.append(name + ("(" + ",".join(f"{k}={v}" for k, v in args.items()) + ")" if args else "()"))
-                result = self._dispatch_tool(name, args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": json.dumps(result)[:1500],
-                })
-        return "Max reasoning steps reached.", trace
-
-    def _openai_chat(self, messages, tools=None):
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            return None
-        import urllib.request
-        body = {"model": self._LLM_MODEL, "messages": messages, "temperature": 0}
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            data=json.dumps(body).encode(),
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return json.load(r)
-        except Exception as e:
-            logger.warning(f"openai_chat failed: {type(e).__name__}: {e}")
-            return None
+        """Delegate to the Agent module. Returns (final_text, trace_list)."""
+        if not hasattr(self, "_agent"):
+            self._agent = Agent(
+                dispatch_tool=self._dispatch_tool,
+                describe_view=self._tool_describe_current_view,
+            )
+        return self._agent.run(user_text)
 
     # ----------------------------------------------------------------- tool impls
 
