@@ -5,7 +5,6 @@ Side-by-side GT vs Prediction comparison with color-coded metrics.
 
 import os
 import json
-from pathlib import Path
 
 import omni.ext
 import omni.ui as ui
@@ -13,75 +12,39 @@ import omni.usd
 from pxr import Usd, UsdGeom, Gf, Sdf
 
 from . import generate_assets
+from .config import (
+    PROJ_ROOT, RAW_DATA_DIR, STL_DIR, RESULTS_DIR, USD_DIR, METRICS_DIR,
+    SAMPLES, SAMPLE_LABELS,
+    MODELS, MODEL_LABELS, MODEL_SHORT,
+    FIELDS, FIELD_LABELS, FIELD_UNITS,
+    SIDE_BY_SIDE_OFFSET,
+)
+from .denormalize import denormalize_field
+from .log import logger
+from .theme import (
+    Color, Font,
+    r2_color as _r2_color, r2_label as _r2_label, winner_arrow as _winner_arrow,
+)
 
-PROJ_ROOT = Path(os.environ.get("DT_PROJ_ROOT", r"C:\Users\Ranga\298AB-dt-viewer"))
-RAW_DATA_DIR = PROJ_ROOT / "test_data"
-STL_DIR = PROJ_ROOT / "stl"
-RESULTS_DIR = PROJ_ROOT / "results"
-USD_DIR = Path(os.environ.get("DT_USD_DIR", str(PROJ_ROOT / "outputs" / "usd_omniverse")))
-METRICS_DIR = Path(os.environ.get("DT_METRICS_DIR", str(PROJ_ROOT / "outputs" / "omniverse_predictions")))
+# Backwards-compat aliases (existing method bodies still reference bare names).
+GREEN     = Color.GREEN_PRIMARY
+ACCENT    = Color.GREEN_ACCENT
+SECONDARY = Color.SECONDARY
+RED       = Color.RED
+YELLOW    = Color.YELLOW
+WHITE     = Color.WHITE
+GRAY      = Color.GRAY
+DARK_BG   = Color.DARK_BG
+CARD_BG   = Color.CARD_BG
+CYAN      = Color.CYAN
 
-SAMPLES = [0, 1, 2]
-SAMPLE_LABELS = {0: "Room 0 (config 0)", 1: "Room 1 (config 1)", 2: "Room 2 (config 2)"}
-MODELS = ["fno_pred", "unet_pred"]
-MODEL_LABELS = {"fno_pred": "FNO (28.3M params)", "unet_pred": "U-Net (22.6M params)"}
-MODEL_SHORT = {"fno_pred": "FNO", "unet_pred": "U-Net"}
-FIELDS = ["T", "U_magnitude", "p"]
-FIELD_LABELS = {"T": "Temperature", "U_magnitude": "Velocity Magnitude", "p": "Pressure"}
-FIELD_UNITS = {"T": "\u00b0C", "U_magnitude": "m/s", "p": "Pa"}
-
-# Colors — NVIDIA Omniverse palette
-GREEN = 0xFF00B140      # NVIDIA green (primary brand)
-ACCENT = 0xFF76B900     # NVIDIA accent green (secondary)
-SECONDARY = 0xFF3F3F48  # button secondary fill
-RED = 0xFFE53935
-YELLOW = 0xFFFFC107
-WHITE = 0xFFEEEEEE      # soft white for dark theme
-GRAY = 0xFFA0A0A8
-DARK_BG = 0xFF1F1F28
-CARD_BG = 0xFF2A2A32
-CYAN = 0xFF4FC3F7       # only used for "current view" info strip
-
-# Font sizes — consistent scale
-FS_TITLE = 20
-FS_SUBTITLE = 14
-FS_SECTION = 14
-FS_BODY = 13
-FS_LABEL = 12
-FS_CAPTION = 11
-FS_FOOTER = 10
-
-# Offset for side-by-side (datacenter is ~40m long, offset by 50m)
-SIDE_BY_SIDE_OFFSET = 50.0
-
-
-def _r2_color(r2):
-    if r2 >= 0.9: return GREEN
-    if r2 >= 0.5: return YELLOW
-    return RED
-
-
-def _r2_label(r2):
-    if r2 >= 0.95: return "Excellent"
-    if r2 >= 0.9: return "Good"
-    if r2 >= 0.7: return "Fair"
-    if r2 >= 0.0: return "Poor"
-    return "Negative"
-
-
-def _winner_arrow(fno_val, unet_val, lower_is_better=True):
-    try:
-        fno_val = float(fno_val)
-        unet_val = float(unet_val)
-    except (TypeError, ValueError):
-        return "?"
-    if lower_is_better:
-        if fno_val < unet_val: return "FNO"
-        elif unet_val < fno_val: return "U-Net"
-    else:
-        if fno_val > unet_val: return "FNO"
-        elif unet_val > fno_val: return "U-Net"
-    return "Tie"
+FS_TITLE    = Font.TITLE
+FS_SUBTITLE = Font.SECTION   # collapsed: original 14 -> SECTION
+FS_SECTION  = Font.SECTION
+FS_BODY     = Font.BODY
+FS_LABEL    = Font.LABEL
+FS_CAPTION  = Font.CAPTION
+FS_FOOTER   = 10
 
 
 class DatacenterDTAnalyticsExtension(omni.ext.IExt):
@@ -100,9 +63,9 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             self._window.dock_order = 0
             self._window.deferred_dock_in("Property")
         except Exception as e:
-            print(f"[dt.analytics] dock setup skipped: {e}")
+            logger.debug(f"dock setup skipped: {e}")
         self._window.visible = True
-        print(f"[dt.analytics] window '{self.WINDOW_TITLE}' created, visible={self._window.visible}")
+        logger.debug(f"window '{self.WINDOW_TITLE}' created, visible={self._window.visible}")
         self._current_sample = 0
         self._current_model = "fno_pred"
         self._current_field = "T"
@@ -136,7 +99,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             ]
             menu_utils.add_menu_items(self._menu_items, "Window")
         except Exception as e:
-            print(f"[dt.analytics] could not register Window menu: {e}")
+            logger.debug(f"could not register Window menu: {e}")
             self._menu_items = None
 
     def _unregister_menu(self):
@@ -184,7 +147,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             self._load_metrics()
         except Exception as e:
             import traceback
-            print(f"[dt.analytics] generate_assets failed: {e}")
+            logger.warning(f"generate_assets failed: {e}")
             traceback.print_exc()
 
     def _load_single(self, model, field, is_error=False, is_iso=False):
@@ -207,13 +170,13 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         pred_path = self._load_single(model, field)
         err_path = self._load_single(model, field, is_error=True) if self._show_error else None
 
-        print(f"[dt.analytics] _load_comparison_scene sample={idx} field={field} model={model}")
-        print(f"[dt.analytics]   GT   : {gt_path}  exists={gt_path.exists()}")
-        print(f"[dt.analytics]   Pred : {pred_path}  exists={pred_path.exists()}")
+        logger.debug(f"_load_comparison_scene sample={idx} field={field} model={model}")
+        logger.debug(f"GT   : {gt_path}  exists={gt_path.exists()}")
+        logger.debug(f"Pred : {pred_path}  exists={pred_path.exists()}")
         if err_path:
-            print(f"[dt.analytics]   Err  : {err_path}  exists={err_path.exists()}")
+            logger.debug(f"Err  : {err_path}  exists={err_path.exists()}")
         if not gt_path.exists() or not pred_path.exists():
-            print("[dt.analytics]   ABORT \u2014 missing GT or Prediction file")
+            logger.warning("ABORT \u2014 missing GT or Prediction file")
             return
 
         try:
@@ -227,8 +190,8 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
             gt_ref  = gt_path.as_posix()
             pred_ref = pred_path.as_posix()
-            print(f"[dt.analytics]   ref GT   = {gt_ref}")
-            print(f"[dt.analytics]   ref Pred = {pred_ref}")
+            logger.debug(f"ref GT   = {gt_ref}")
+            logger.debug(f"ref Pred = {pred_ref}")
 
             gt_xf = UsdGeom.Xform.Define(stage, "/DatacenterComparison/GroundTruth")
             gt_xf.GetPrim().GetReferences().AddReference(gt_ref)
@@ -244,12 +207,12 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                 err_xf.AddTranslateOp().Set(Gf.Vec3d(0, SIDE_BY_SIDE_OFFSET * 2, 0))
 
             stage.GetRootLayer().Export(str(compose_path))
-            print(f"[dt.analytics]   composed stage saved -> {compose_path}")
+            logger.debug(f"composed stage saved -> {compose_path}")
             omni.usd.get_context().open_stage(str(compose_path))
             self._frame_all()
         except Exception as e:
             import traceback
-            print(f"[dt.analytics] _load_comparison_scene ERROR: {e}")
+            logger.warning(f"_load_comparison_scene ERROR: {e}")
             traceback.print_exc()
             return
 
@@ -264,12 +227,12 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         else:
             path = self._load_single(self._current_model, self._current_field)
 
-        print(f"[dt.analytics] _load_single_scene -> {path}  exists={path.exists()}")
+        logger.debug(f"_load_single_scene -> {path}  exists={path.exists()}")
         if path.exists():
             omni.usd.get_context().open_stage(str(path))
             self._frame_all()
         else:
-            print("[dt.analytics]   ABORT \u2014 file not found (if Isosurface Mode is checked, iso USDs aren't generated yet)")
+            logger.warning("ABORT \u2014 file not found (if Isosurface Mode is checked, iso USDs aren't generated yet)")
         self._rebuild_metrics_panel()
 
     def _load_gt_only(self):
@@ -286,13 +249,13 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         import omni.usd
         stage = omni.usd.get_context().get_stage()
         if stage is None:
-            print("[dt.analytics] _frame_all: no stage")
+            logger.debug("_frame_all: no stage")
             return
 
         user_roots = [str(p.GetPath()) for p in stage.GetPseudoRoot().GetChildren()
                       if not str(p.GetPath()).startswith(("/Omni", "/Render"))]
         if not user_roots:
-            print("[dt.analytics] _frame_all: no user-scene roots")
+            logger.debug("_frame_all: no user-scene roots")
             return
 
         # Force any payloads/references on these prims to load synchronously.
@@ -306,7 +269,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                 expand_in_stage=True,
             )
         except Exception as e:
-            print(f"[dt.analytics] SelectPrims failed: {e}")
+            logger.warning(f"SelectPrims failed: {e}")
 
         import omni.kit.app
         from pxr import UsdGeom, Gf
@@ -330,14 +293,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                 try:
                     from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
                     frame_viewport_selection(get_active_viewport())
-                    print(f"[dt.analytics] _frame_all: framed via selection (bbox size={r.GetSize()})")
+                    logger.debug(f"_frame_all: framed via selection (bbox size={r.GetSize()})")
                     return
                 except Exception as e:
-                    print(f"[dt.analytics] frame_viewport_selection failed: {e}")
+                    logger.warning(f"frame_viewport_selection failed: {e}")
 
             # Fallback: hardcode a known-good camera pose for our fixed data layout.
             # GT spans ~X 0-38, Y 0-4, Z 0-3.  Pred offset +50 in Y.
-            print("[dt.analytics] _frame_all: bbox still empty, using manual camera")
+            logger.debug("_frame_all: bbox still empty, using manual camera")
             cam = stage.GetPrimAtPath("/OmniverseKit_Persp")
             if cam:
                 api = UsdGeom.XformCommonAPI(cam)
@@ -351,16 +314,16 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         asyncio.ensure_future(_deferred())
 
     def _on_load(self):
-        print("[dt.analytics] ========== LOAD SCENE ==========")
-        print(f"[dt.analytics]   sample       = {self._current_sample} ({SAMPLE_LABELS.get(self._current_sample)})")
-        print(f"[dt.analytics]   field        = {self._current_field}")
-        print(f"[dt.analytics]   model        = {self._current_model}")
-        print(f"[dt.analytics]   comparison   = {self._comparison_mode}")
-        print(f"[dt.analytics]   show_error   = {self._show_error}")
-        print(f"[dt.analytics]   isosurface   = {self._show_isosurface}")
-        print(f"[dt.analytics]   USD_DIR      = {USD_DIR}")
-        print(f"[dt.analytics]   RAW_DATA_DIR = {RAW_DATA_DIR}")
-        print(f"[dt.analytics]   OPENAI_API_KEY set = {bool(os.environ.get('OPENAI_API_KEY'))}")
+        logger.debug("========== LOAD SCENE ==========")
+        logger.debug(f"sample       = {self._current_sample} ({SAMPLE_LABELS.get(self._current_sample)})")
+        logger.debug(f"field        = {self._current_field}")
+        logger.debug(f"model        = {self._current_model}")
+        logger.debug(f"comparison   = {self._comparison_mode}")
+        logger.warning(f"show_error   = {self._show_error}")
+        logger.debug(f"isosurface   = {self._show_isosurface}")
+        logger.debug(f"USD_DIR      = {USD_DIR}")
+        logger.debug(f"RAW_DATA_DIR = {RAW_DATA_DIR}")
+        logger.debug(f"OPENAI_API_KEY set = {bool(os.environ.get('OPENAI_API_KEY'))}")
         self._ensure_generated()
         if self._comparison_mode:
             self._load_comparison_scene()
@@ -494,16 +457,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         if not target_path.exists():
             return None
         target = np.load(target_path)
-        if field == "T":
-            arr = target[3] * 4.0 + 39.0
-            unit = "\u00b0C"
-        elif field == "U_magnitude":
-            U = target[:3] * 1.3656 + 1.5984
-            arr = np.sqrt(np.sum(U * U, axis=0))
-            unit = "m/s"
-        else:
-            arr = target[4] * 4.1660 + 6.1227
-            unit = "Pa"
+        arr, unit = denormalize_field(target, field)
         flat_idx = int(np.argmax(arr) if op == "max" else np.argmin(arr))
         ind = np.unravel_index(flat_idx, arr.shape)
         value = float(arr[ind])
@@ -541,7 +495,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
             frame_viewport_selection(get_active_viewport())
         except Exception as e:
-            print(f"[dt.analytics] frame_viewport_selection failed: {e}")
+            logger.warning(f"frame_viewport_selection failed: {e}")
         return True
 
     def _on_query(self, text):
@@ -611,7 +565,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.load(r)
         except Exception as e:
-            print(f"[dt.analytics] openai_chat failed: {type(e).__name__}: {e}")
+            logger.warning(f"openai_chat failed: {type(e).__name__}: {e}")
             return None
 
     # ----------------------------------------------------------------- tool impls
@@ -688,13 +642,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         if not target_path.exists():
             return {"error": "target not on disk"}
         target = np.load(target_path)
-        if field == "T":
-            arr = target[3] * 4.0 + 39.0; unit = "\u00b0C"
-        elif field == "U_magnitude":
-            U = target[:3] * 1.3656 + 1.5984
-            arr = np.sqrt(np.sum(U * U, axis=0)); unit = "m/s"
-        else:
-            arr = target[4] * 4.1660 + 6.1227; unit = "Pa"
+        arr, unit = denormalize_field(target, field)
         return {
             "field": field, "unit": unit, "room": idx,
             "min":  round(float(arr.min()),  3),
