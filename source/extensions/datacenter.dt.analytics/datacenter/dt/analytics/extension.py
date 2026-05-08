@@ -839,9 +839,11 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                             )
                             self._btn_ask.set_clicked_fn(_submit_query)
 
-                        # Sample questions — one click populates the field and submits.
-                        # Each question exercises a different tool combination so the
-                        # demo can cover the agent surface in 5 clicks.
+                        # Sample questions in a dropdown — picking a row populates the
+                        # input field AND submits the query in one action. Each
+                        # sample exercises a different tool combination so the demo
+                        # can cover the agent surface in 5 picks.
+                        SAMPLE_PLACEHOLDER = "— sample questions —"
                         SAMPLE_QUERIES = [
                             "Where is the hottest spot in room 0 and what should I do?",
                             "Among rooms 0, 1, and 2, which has the most thermal stress?",
@@ -850,24 +852,24 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                             "Recommend immediate cooling actions for the current hotspot.",
                         ]
 
-                        def _make_sample_runner(text):
-                            def _run(*_args):
-                                self._query_field.model.set_value(text)
-                                self._on_query(text)
-                            return _run
-
-                        for sample in SAMPLE_QUERIES:
-                            btn = ui.Button(
-                                sample,
-                                height=24,
-                                style={"background_color": Color.SECONDARY,
-                                       "color": Color.WHITE,
-                                       "font_size": Font.LABEL,
-                                       "border_radius": 4,
-                                       "padding": 4},
-                                tooltip="Click to send this question to the agent.",
+                        with ui.HStack(height=26, spacing=6):
+                            ui.Label("Try:", width=30,
+                                     style={"font_size": Font.LABEL, "color": Color.GRAY})
+                            self._sample_combo = ui.ComboBox(
+                                0, SAMPLE_PLACEHOLDER, *SAMPLE_QUERIES
                             )
-                            btn.set_clicked_fn(_make_sample_runner(sample))
+
+                        def _on_sample_picked(model, _item):
+                            idx = model.get_item_value_model().as_int
+                            if idx <= 0:
+                                return  # placeholder selected, nothing to do
+                            text = SAMPLE_QUERIES[idx - 1]
+                            self._query_field.model.set_value(text)
+                            self._on_query(text)
+                            # Reset to placeholder so re-picking the same row fires again.
+                            model.get_item_value_model().set_value(0)
+
+                        self._sample_combo.model.add_item_changed_fn(_on_sample_picked)
 
                         ui.Spacer(height=2)
 
