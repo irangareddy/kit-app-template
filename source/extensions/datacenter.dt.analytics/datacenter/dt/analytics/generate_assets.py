@@ -83,34 +83,44 @@ def _load_real_metrics(results_dir):
     192 test samples during training on GB10. These are model-level metrics,
     not per-sample, so the same dict is returned for every sample.
     """
-    fno_path = results_dir / "fno_fullres_results.json"
-    unet_path = results_dir / "unet_fullres_results.json"
-    if not fno_path.exists() or not unet_path.exists():
-        print(f"[dt.analytics] missing results JSON(s) in {results_dir}")
-        return None
+    model_files = {
+        "UNet":       results_dir / "unet_fullres_results.json",
+        "FNO":        results_dir / "fno_fullres_results.json",
+        "PI-FNO":     results_dir / "pifno_fullres_results.json",
+        "PI-UNet":    results_dir / "pi_unet_fullres_results.json",
+        "Transolver": results_dir / "transolver_fullres_results.json",
+    }
 
-    with open(fno_path) as f:
-        fno_raw = json.load(f)
-    with open(unet_path) as f:
-        unet_raw = json.load(f)
+    # Require at least FNO + U-Net
+    if not model_files["FNO"].exists() or not model_files["UNet"].exists():
+        print(f"[dt.analytics] missing core results JSON(s) in {results_dir}")
+        return None
 
     def entry(raw):
         pm = raw["physical_metrics"]
         return {
-            "inference_ms": round(raw["inference"]["latency_mean_ms"], 1),
-            "T":  {"MAE": round(pm["temperature"]["MAE_C"], 4),
+            "inference_ms": round(raw.get("inference", {}).get("latency_mean_ms", 0), 1),
+            "T":  {"MAE": round(pm["temperature"].get("MAE_C", pm["temperature"].get("MAE", 0)), 4),
                    "R2": round(pm["temperature"]["R2"], 4)},
-            "Ux": {"MAE": round(pm["velocity_x"]["MAE_ms"], 4),
+            "Ux": {"MAE": round(pm["velocity_x"].get("MAE_ms", pm["velocity_x"].get("MAE", 0)), 4),
                    "R2": round(pm["velocity_x"]["R2"], 4)},
-            "Uy": {"MAE": round(pm["velocity_y"]["MAE_ms"], 4),
+            "Uy": {"MAE": round(pm["velocity_y"].get("MAE_ms", pm["velocity_y"].get("MAE", 0)), 4),
                    "R2": round(pm["velocity_y"]["R2"], 4)},
-            "Uz": {"MAE": round(pm["velocity_z"]["MAE_ms"], 4),
+            "Uz": {"MAE": round(pm["velocity_z"].get("MAE_ms", pm["velocity_z"].get("MAE", 0)), 4),
                    "R2": round(pm["velocity_z"]["R2"], 4)},
-            "p":  {"MAE": round(pm["pressure"]["MAE_Pa"], 4),
+            "p":  {"MAE": round(pm["pressure"].get("MAE_Pa", pm["pressure"].get("MAE", 0)), 4),
                    "R2": round(pm["pressure"]["R2"], 4)},
         }
 
-    return {"FNO": entry(fno_raw), "UNet": entry(unet_raw)}
+    result = {}
+    for label, path in model_files.items():
+        if path.exists():
+            with open(path) as f:
+                result[label] = entry(json.load(f))
+            print(f"[dt.analytics]   loaded metrics for {label}")
+        else:
+            print(f"[dt.analytics]   skipping {label} (no JSON)")
+    return result
 
 
 def _attach_sample_ranges(metrics, target):
