@@ -14,7 +14,7 @@ from .log import logger
 #   1. DT_PROJ_ROOT environment variable (explicit override)
 #   2. ~/298AB-dt-viewer (the user-home convention used in development)
 # The default is logged at import time so the operator sees what was picked.
-PROJ_ROOT = Path(os.environ.get("DT_PROJ_ROOT", str(Path.home() / "298AB-dt-viewer")))
+PROJ_ROOT = Path(os.environ.get("DT_PROJ_ROOT", str(Path.home() / "boreas-data")))
 RAW_DATA_DIR = PROJ_ROOT / "test_data"
 STL_DIR      = PROJ_ROOT / "stl"
 RESULTS_DIR  = PROJ_ROOT / "results"
@@ -24,13 +24,22 @@ METRICS_DIR  = Path(os.environ.get("DT_METRICS_DIR", str(PROJ_ROOT / "outputs" /
 logger.info("PROJ_ROOT resolved to %s (exists=%s)", PROJ_ROOT, PROJ_ROOT.exists())
 
 # Datacenter rooms available for inspection.
-SAMPLES = [0, 1, 2]
-SAMPLE_LABELS = {0: "Room 0 (config 0)", 1: "Room 1 (config 1)", 2: "Room 2 (config 2)"}
+SAMPLES = list(range(10))
+SAMPLE_LABELS = {i: f"Room {i} (config {i})" for i in range(10)}
 
 # Surrogate models the operator can compare.
-MODELS = ["fno_pred", "unet_pred"]
-MODEL_LABELS = {"fno_pred": "FNO (28.3M params)", "unet_pred": "U-Net (22.6M params)"}
-MODEL_SHORT  = {"fno_pred": "FNO",                "unet_pred": "U-Net"}
+MODELS = ["unet_pred", "fno_pred", "pifno_pred", "pi_unet_pred", "transolver_pred"]
+MODEL_LABELS = {
+    "unet_pred":       "U-Net (22.6M params)",
+    "fno_pred":        "FNO (28.3M params)",
+    "pifno_pred":      "PI-FNO (28.3M params)",
+    "pi_unet_pred":    "PI-U-Net (344K params)",
+    "transolver_pred": "Transolver (545K params)",
+}
+MODEL_SHORT = {
+    "unet_pred": "U-Net", "fno_pred": "FNO", "pifno_pred": "PI-FNO",
+    "pi_unet_pred": "PI-U-Net", "transolver_pred": "Transolver",
+}
 
 # CFD fields visualized.
 FIELDS = ["T", "U_magnitude", "p"]

@@ -16,9 +16,9 @@ from pathlib import Path
 
 SPACING = 0.04
 STRIDE = 8
-SAMPLES = [0, 1, 2]
+SAMPLES = list(range(10))
 FIELDS = ["T", "U_magnitude", "p"]
-MODELS = ["unet", "fno"]
+MODELS = ["unet", "fno", "pifno", "pi_unet", "transolver"]
 
 DENORM_T = (39.0, 4.0)
 DENORM_U = (1.5984, 1.3656)
