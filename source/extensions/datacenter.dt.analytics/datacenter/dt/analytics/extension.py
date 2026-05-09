@@ -834,6 +834,9 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                             "Compare FNO and U-Net temperature accuracy across the test set.",
                             "What is the airflow distribution in room 1? Is it adequate?",
                             "Recommend immediate cooling actions for the current hotspot.",
+                            "Where is the hottest spot in room 5?",
+                            "What is the temperature distribution in room 9 — any anomalies?",
+                            "Compare peak temperatures across rooms 5, 7, and 9.",
                         ]
 
                         with ui.HStack(height=26, spacing=6):
