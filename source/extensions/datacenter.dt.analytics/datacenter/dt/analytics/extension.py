@@ -782,6 +782,16 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
                 ui.Spacer(height=4)
 
+                # Live stream status bar
+                from .config import LIVE_STREAM_URL
+                if LIVE_STREAM_URL:
+                    with ui.ZStack(height=32):
+                        ui.Rectangle(style={"background_color": 0xFF1A3A1A, "border_radius": 6})
+                        self._live_label = ui.Label(
+                            "  LIVE: connecting...",
+                            style={"font_size": 12, "color": 0xFF44FF44},
+                        )
+
                 # Controls
                 with ui.CollapsableFrame("Controls", height=0, collapsed=False):
                     with ui.VStack(spacing=6):
