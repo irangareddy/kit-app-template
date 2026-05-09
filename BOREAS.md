@@ -1,6 +1,6 @@
 # Boreas Operator — Fork Notice
 
-This repository is a fork of [NVIDIA-Omniverse/kit-app-template](https://github.com/NVIDIA-Omniverse/kit-app-template) that adds a custom Omniverse Kit application called **Boreas — Datacenter Operator Agent**, the Tier 1 visualization frontend of [Project Boreas](https://github.com/irangareddy/298AB-dt-viewer) (SJSU MSDA capstone, May 2026).
+This repository is a fork of [NVIDIA-Omniverse/kit-app-template](https://github.com/NVIDIA-Omniverse/kit-app-template) that adds a custom Omniverse Kit application called **Boreas — Datacenter Operator Agent**, the Tier 4 operator console of [Project Boreas](https://github.com/irangareddy/298AB) (SJSU MSDA capstone, May 2026).
 
 The upstream `kit-app-template` is unchanged in `templates/`, `tools/`, and the build system. All Boreas additions live under `source/`:
 
@@ -78,18 +78,53 @@ _build/windows-x86_64/release/datacenter.dt.viewer_streaming.bat
 _build/windows-x86_64/release/datacenter.dt.viewer_avp.bat
 ```
 
-### Configure the data root
+### Set up Boreas data (required before first launch)
 
-The `datacenter.dt.analytics` extension reads its data from environment variables, so the same app works against any Boreas data layout:
+The Kit app needs prediction data from the trained surrogate models. Download it from HuggingFace:
 
 ```bash
-export DT_PROJ_ROOT="/path/to/298AB-dt-viewer"
-export DT_USD_DIR="$DT_PROJ_ROOT/outputs/usd_omniverse"
-export DT_METRICS_DIR="$DT_PROJ_ROOT/outputs/omniverse_predictions"
-export OPENAI_API_KEY="sk-..."     # optional — enables agent mode
+# Install Git LFS if not already installed
+git lfs install
+
+# Clone the data (~11 GB)
+git clone https://huggingface.co/datasets/irangareddy/boreas-data ~/boreas-data
 ```
 
-Defaults assume the Boreas repo at `C:/Users/Ranga/298AB-dt-viewer`.
+This provides 10 datacenter rooms × 5 surrogate models (U-Net, FNO, PI-FNO, PI-U-Net, Transolver) with ground truth CFD data, STL geometry, and evaluation metrics.
+
+**Directory structure:**
+
+```
+~/boreas-data/
+├── test_data/
+│   ├── inputs/          ← 10 × input .npy (10-channel, 80×96×960)
+│   └── targets/         ← 10 × target .npy (5-channel, 80×96×960)
+├── stl/                 ← 6 STL files (datacenter geometry from OpenFOAM)
+├── results/             ← fno_fullres_results.json, unet_fullres_results.json
+└── outputs/
+    └── predictions/     ← 50 × prediction .npy (10 samples × 5 models)
+```
+
+The Kit app auto-generates USD scene files and per-room metrics on first launch (requires `pxr` — available inside the Kit runtime).
+
+### Configure the data root (optional)
+
+The extension defaults to `~/boreas-data/`. Override with environment variables if your data is elsewhere:
+
+```bash
+export DT_PROJ_ROOT="/path/to/boreas-data"
+export DT_USD_DIR="$DT_PROJ_ROOT/outputs/usd_omniverse"
+export DT_METRICS_DIR="$DT_PROJ_ROOT/outputs/omniverse_predictions"
+export OPENAI_API_KEY="sk-..."     # optional — enables LLM agent mode
+```
+
+### Research repo (optional)
+
+The surrogate model training code, paper, and ablation studies are in the research repo:
+
+```bash
+git clone https://github.com/irangareddy/298AB.git
+```
 
 ---
 
