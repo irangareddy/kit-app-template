@@ -38,9 +38,10 @@ FIELD_LABELS = {"T": "Temperature", "U_magnitude": "Velocity Magnitude", "p": "P
 FIELD_UNITS  = {"T": "°C",     "U_magnitude": "m/s",                "p": "Pa"}
 
 # Spatial constants.
-# 50 m offset between Ground Truth and Prediction in side-by-side compose stages
-# (datacenter is ~40 m long, so 50 m gives 10 m of breathing room).
-SIDE_BY_SIDE_OFFSET = 50.0
+# Center-to-center offset between GT and Prediction in side-by-side compose stages.
+# Room is ~3.84 m wide in this axis, so 6 m leaves a 2 m visible gap edge-to-edge —
+# close enough to compare without overlap, comfortable in the AVP headset at 1:1.
+SIDE_BY_SIDE_OFFSET = 6.0
 
 # Grid spacing in meters (matches generate_assets.SPACING).
 SPACING_M = 0.04
