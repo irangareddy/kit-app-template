@@ -39,8 +39,8 @@ FIELD_UNITS  = {"T": "°C",     "U_magnitude": "m/s",                "p": "Pa"}
 
 # Spatial constants.
 # Center-to-center offset between GT and Prediction in side-by-side compose stages.
-# Room is ~3.84 m wide along this axis, so 6 m leaves a 2 m visible gap edge-to-edge.
-SIDE_BY_SIDE_OFFSET = 6.0
+# Room is ~3.84 m wide along this axis, so 10 m leaves a ~6 m visible gap edge-to-edge.
+SIDE_BY_SIDE_OFFSET = 10.0
 
 # Grid spacing in meters (matches generate_assets.SPACING).
 SPACING_M = 0.04
