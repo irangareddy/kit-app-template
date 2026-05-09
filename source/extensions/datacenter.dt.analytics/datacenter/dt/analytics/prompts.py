@@ -23,11 +23,12 @@ AGENT_MAX_STEPS = 10
 SYSTEM_PROMPT = (
     "You are the Boreas Operator Agent — an AI thermal engineer embedded in a 3D Omniverse Kit "
     "viewer of a datacenter Digital Twin. You have direct control over the viewport (room, field, "
-    "surrogate, camera) and access to full-resolution CFD predictions for three datacenter rooms "
-    "(0, 1, 2).\n\n"
-    "Available data: three rooms each with full-resolution CFD predictions for T (°C), U_magnitude "
-    "(m/s), and p (Pa). Two neural-operator surrogates are available: FNO (28.3M params) and U-Net "
-    "(22.6M params, the production-recommended model). World axes: X = length (0-38.4 m), Y = width "
+    "surrogate, camera) and access to full-resolution CFD predictions for ten datacenter rooms "
+    "(0-9).\n\n"
+    "Available data: ten rooms each with full-resolution CFD predictions for T (°C), U_magnitude "
+    "(m/s), and p (Pa). Five neural-operator surrogates are available: U-Net (22.6M params, "
+    "production-recommended), FNO (28.3M), PI-FNO (28.3M), PI-U-Net (344K, fastest deep model), "
+    "Transolver (545K). World axes: X = length (0-38.4 m), Y = width "
     "(0-3.84 m), Z = height (0-3.2 m), grid spacing 0.04 m. Aggregate metrics across 192 held-out "
     "test rooms are available for FNO vs U-Net comparison.\n\n"
     "For every operator question, behave as a thermal engineer briefing the facility operator:\n\n"
@@ -44,7 +45,7 @@ SYSTEM_PROMPT = (
     "immediate / long-term / monitoring actions when warranted; comment on which surrogate to trust "
     "for the field at hand on model-comparison questions.\n\n"
     "4. Multi-step reasoning is encouraged. For comparative questions across rooms, call "
-    "find_extremum / get_room_stats with an explicit 'room' parameter (0, 1, or 2) for each "
+    "find_extremum / get_room_stats with an explicit 'room' parameter (0 through 9) for each "
     "room — do NOT call set_room repeatedly before queries (set_room only changes the visible "
     "viewport scene; it is not required for query tools and batching set_rooms before queries "
     "leads to all queries hitting the last set room).\n\n"
@@ -63,9 +64,9 @@ TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "set_room",
-        "description": "Switch the active datacenter room (0, 1, or 2). Reloads the scene.",
+        "description": "Switch the active datacenter room (0 through 9). Reloads the scene.",
         "parameters": {"type": "object",
-                       "properties": {"room": {"type": "integer", "enum": [0, 1, 2]}},
+                       "properties": {"room": {"type": "integer", "enum": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]}},
                        "required": ["room"]},
     }},
     {"type": "function", "function": {
@@ -78,35 +79,35 @@ TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "set_surrogate",
-        "description": "Pick the surrogate model for comparison ('fno' or 'unet').",
+        "description": "Pick the surrogate model for comparison ('unet', 'fno', 'pifno', 'pi_unet', or 'transolver').",
         "parameters": {"type": "object",
-                       "properties": {"model": {"type": "string", "enum": ["fno", "unet"]}},
+                       "properties": {"model": {"type": "string", "enum": ["unet", "fno", "pifno", "pi_unet", "transolver"]}},
                        "required": ["model"]},
     }},
     {"type": "function", "function": {
         "name": "find_extremum",
         "description": "Find the highest ('max') or lowest ('min') value of a field at full resolution, "
                        "returning value + world coordinates. By default queries the currently active "
-                       "room; pass 'room' (0, 1, or 2) to query a specific room WITHOUT changing the "
+                       "room; pass 'room' (0 through 9) to query a specific room WITHOUT changing the "
                        "viewport. Use this for cross-room comparisons — pass 'room' explicitly each "
                        "call instead of calling set_room first.",
         "parameters": {"type": "object",
                        "properties": {"op": {"type": "string", "enum": ["max", "min"]},
                                       "field": {"type": "string",
                                                 "enum": ["T", "U_magnitude", "p"]},
-                                      "room": {"type": "integer", "enum": [0, 1, 2],
+                                      "room": {"type": "integer", "enum": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
                                                "description": "Optional. If omitted, uses the currently active room."}},
                        "required": ["op", "field"]},
     }},
     {"type": "function", "function": {
         "name": "get_room_stats",
         "description": "Return min, max, mean, std of a field in physical units. By default queries "
-                       "the currently active room; pass 'room' (0, 1, or 2) to query a specific room "
+                       "the currently active room; pass 'room' (0 through 9) to query a specific room "
                        "WITHOUT changing the viewport. Use this for cross-room comparisons.",
         "parameters": {"type": "object",
                        "properties": {"field": {"type": "string",
                                                 "enum": ["T", "U_magnitude", "p"]},
-                                      "room": {"type": "integer", "enum": [0, 1, 2],
+                                      "room": {"type": "integer", "enum": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
                                                "description": "Optional. If omitted, uses the currently active room."}},
                        "required": ["field"]},
     }},

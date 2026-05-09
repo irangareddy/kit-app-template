@@ -480,8 +480,9 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         return {"ok": True, "field": field}
 
     def _tool_set_surrogate(self, model):
-        if model not in ("fno", "unet"):
-            return {"error": "model must be 'fno' or 'unet'"}
+        valid = ("unet", "fno", "pifno", "pi_unet", "transolver")
+        if model not in valid:
+            return {"error": f"model must be one of {valid}"}
         self.state.model = f"{model}_pred"
         return {"ok": True, "model": model}
 
