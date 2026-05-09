@@ -145,17 +145,32 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         if not stage:
             return
 
-        # Find the prediction Field prim (Points with displayColor)
-        pred_path = "/World/Prediction/Field"
-        prim = stage.GetPrimAtPath(pred_path)
+        # Find all Field prims in the composed stage
+        # Composed paths: /DatacenterComparison/Prediction/World/Field
+        #                 /DatacenterComparison/GroundTruth/World/Field
+        #                 /World/Field (single scene)
+        candidate_paths = [
+            "/DatacenterComparison/Prediction/World/Field",
+            "/DatacenterComparison/GroundTruth/World/Field",
+            "/World/Field",
+        ]
+
+        prim = None
+        for p in candidate_paths:
+            prim = stage.GetPrimAtPath(p)
+            if prim and prim.IsValid():
+                break
+
         if not prim or not prim.IsValid():
-            # Try alternate paths
-            for p in ["/World/Field", "/World/Pred/Field"]:
-                prim = stage.GetPrimAtPath(p)
-                if prim and prim.IsValid():
+            # Search all prims for any Points prim
+            for p in stage.Traverse():
+                if p.IsA(UsdGeom.Points):
+                    prim = p
+                    logger.debug(f"Live viewport: found Points at {p.GetPath()}")
                     break
-            if not prim or not prim.IsValid():
-                return
+
+        if not prim or not prim.IsValid():
+            return
 
         pts = UsdGeom.Points(prim)
         if not pts:
@@ -179,9 +194,15 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         colors = np.stack([r, g, b], axis=-1).astype(np.float32)
 
         from pxr import Vt
-        color_attr = pts.GetDisplayColorAttr()
-        if color_attr:
-            color_attr.Set(Vt.Vec3fArray.FromNumpy(colors))
+
+        # Update ALL Points prims in the stage (GT + Prediction)
+        for p in stage.Traverse():
+            if p.IsA(UsdGeom.Points):
+                pts_prim = UsdGeom.Points(p)
+                existing_colors = pts_prim.GetDisplayColorAttr().Get()
+                if existing_colors and len(existing_colors) == len(colors):
+                    pts_prim.GetDisplayColorAttr().Set(Vt.Vec3fArray.FromNumpy(colors))
+                    logger.debug(f"Live: updated {p.GetPath()} ({len(colors)} pts)")
 
     def on_shutdown(self):
         self._live_running = False
