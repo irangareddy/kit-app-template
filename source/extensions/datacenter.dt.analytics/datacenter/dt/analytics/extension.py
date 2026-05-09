@@ -93,11 +93,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
         async def _poll_loop():
             import urllib.request
+            import numpy as np
             while self._live_running:
                 try:
-                    url = f"{LIVE_STREAM_URL}/live/summary"
-                    with urllib.request.urlopen(url, timeout=3) as resp:
+                    # Fetch full data (with point values) for viewport animation
+                    url = f"{LIVE_STREAM_URL}/live"
+                    with urllib.request.urlopen(url, timeout=5) as resp:
                         data = json.loads(resp.read())
+
                     t_min = data.get("t_min", 0)
                     t_max = data.get("t_max", 0)
                     t_mean = data.get("t_mean", 0)
@@ -106,24 +109,79 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                     hotspot = data.get("hotspot_x_m", 0)
                     ts = data.get("timestamp", 0)
 
+                    # Update status label
                     status = (
-                        f"LIVE t={ts:.0f}s | "
-                        f"T=[{t_min:.1f}, {t_max:.1f}]°C mean={t_mean:.1f}°C | "
+                        f"  LIVE t={ts:.0f}s | "
+                        f"T=[{t_min:.1f}, {t_max:.1f}]°C | "
                         f"drift={drift:+.1f}°C | "
                         f"hotspot@{hotspot:.0f}m | "
                         f"{ashrae}"
                     )
                     if self._live_label:
                         self._live_label.text = status
+
+                    # Update point cloud colors in the viewport
+                    if "data" in data and "mask" in data:
+                        shape = data["shape"]
+                        vals = np.array(data["data"], dtype=np.float32).reshape(shape)
+                        mask = np.array(data["mask"], dtype=np.float32).reshape(shape)
+                        self._update_live_viewport(vals, mask, t_min, t_max)
+
                     logger.debug(status)
                 except Exception as e:
                     if self._live_label:
-                        self._live_label.text = f"LIVE: connection error ({e})"
+                        self._live_label.text = f"  LIVE: connection error"
                     logger.warning(f"Live stream error: {e}")
 
                 await asyncio.sleep(LIVE_POLL_INTERVAL_S)
 
         asyncio.ensure_future(_poll_loop())
+
+    def _update_live_viewport(self, vals, mask, vmin, vmax):
+        """Recolor the prediction point cloud with live thermal data."""
+        import numpy as np
+
+        stage = omni.usd.get_context().get_stage()
+        if not stage:
+            return
+
+        # Find the prediction Field prim (Points with displayColor)
+        pred_path = "/World/Prediction/Field"
+        prim = stage.GetPrimAtPath(pred_path)
+        if not prim or not prim.IsValid():
+            # Try alternate paths
+            for p in ["/World/Field", "/World/Pred/Field"]:
+                prim = stage.GetPrimAtPath(p)
+                if prim and prim.IsValid():
+                    break
+            if not prim or not prim.IsValid():
+                return
+
+        pts = UsdGeom.Points(prim)
+        if not pts:
+            return
+
+        # Apply turbo colormap to the new values
+        flat = vals.flatten()
+        mask_flat = mask.flatten()
+        t = np.clip((flat - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
+
+        # Simple turbo-like colormap: blue → cyan → green → yellow → red
+        r = np.where(t < 0.25, 0.0, np.where(t < 0.5, (t - 0.25) * 4, np.where(t < 0.75, 1.0, 1.0)))
+        g = np.where(t < 0.25, t * 4, np.where(t < 0.5, 1.0, np.where(t < 0.75, 1.0 - (t - 0.5) * 4, 0.0)))
+        b = np.where(t < 0.25, 1.0, np.where(t < 0.5, 1.0 - (t - 0.25) * 4, 0.0))
+
+        # Zero out solid regions
+        r *= mask_flat
+        g *= mask_flat
+        b *= mask_flat
+
+        colors = np.stack([r, g, b], axis=-1).astype(np.float32)
+
+        from pxr import Vt
+        color_attr = pts.GetDisplayColorAttr()
+        if color_attr:
+            color_attr.Set(Vt.Vec3fArray.FromNumpy(colors))
 
     def on_shutdown(self):
         self._live_running = False
