@@ -17,6 +17,24 @@ A custom Omniverse Kit application that lets a datacenter operator:
 
 Built on `NVIDIA-Omniverse/kit-app-template`. Forked at Kit SDK 110.0. Adds one Python extension and three `.kit` application variants.
 
+### Quick start on a fresh machine (3 steps)
+
+```bash
+# 1. Clone the application
+git clone https://github.com/irangareddy/kit-app-template.git
+cd kit-app-template
+
+# 2. Clone the dataset (USDs + metrics + raw test data) from HuggingFace
+git lfs install
+git clone https://huggingface.co/datasets/irangareddy/boreas-data ~/boreas-data
+
+# 3. Build + launch the desktop demo
+.\repo.bat build                                                # Windows
+_build\windows-x86_64\release\datacenter.dt.viewer.bat
+```
+
+The Kit app reads from `~/boreas-data/` by default (overridable via `$DT_PROJ_ROOT`) and auto-generates any missing USD scenes on first launch. Out of the box: **10 rooms × 5 surrogates** + the LLM agent.
+
 ---
 
 ## 2. The business case
@@ -69,8 +87,8 @@ Title: **Boreas Operator** (window title in the Kit app's right column). Three s
 
 ### 5.1 Controls
 
-- **Room** dropdown — 3 sample rooms (Room 0/1/2 — see §10 for how to add more)
-- **Surrogate** dropdown — FNO (28.3 M params) or U-Net (9.2 M params)
+- **Room** dropdown — 10 sample rooms (Room 0–9, auto-labeled from `SAMPLES = list(range(10))`)
+- **Surrogate** dropdown — 5 models: U-Net (22.6 M), FNO (28.3 M), PI-FNO (28.3 M), PI-U-Net (344 K), Transolver (545 K)
 - **Field** dropdown — Temperature (°C) / Velocity Magnitude (m/s) / Pressure (Pa)
 - **Side-by-side (GT left | Pred right)** checkbox — composes the two rooms 10 m apart in one stage
 - **Show Error Map (3rd row)** checkbox — adds the per-cell |GT − Pred| error map at 20 m
@@ -310,16 +328,18 @@ If any of these regress on demo day, the desktop variant is the fallback; both v
 
 ## 10. Adding more rooms
 
-The shipped app has **3 rooms** (Room 0, 1, 2). The dropdown is driven by `SAMPLES = [0, 1, 2]` in `config.py`. Each room needs both a set of USD prediction files and a metrics JSON; without either, the panel will say *"No metrics on disk for this room"* and the scene loader will log `ABORT — missing GT or Prediction file`.
+The shipped app has **10 rooms** (Room 0–9). The dropdown is driven by `SAMPLES = list(range(10))` in `config.py`. Each room needs both a set of USD prediction files and a metrics JSON; without either, the panel will say *"No metrics on disk for this room"* and the scene loader will log `ABORT — missing GT or Prediction file`. All 10 are pre-rendered in the HuggingFace dataset.
 
 ### 10.1 Where the data lives
 
 ```python
 # source/extensions/datacenter.dt.analytics/datacenter/dt/analytics/config.py
-PROJ_ROOT    = ~/298AB-dt-viewer            # override with $DT_PROJ_ROOT env var
+PROJ_ROOT    = ~/boreas-data                              # override with $DT_PROJ_ROOT env var
 USD_DIR      = $PROJ_ROOT/outputs/usd_omniverse           # override with $DT_USD_DIR
 METRICS_DIR  = $PROJ_ROOT/outputs/omniverse_predictions   # override with $DT_METRICS_DIR
 ```
+
+The `~/boreas-data/` tree is downloaded from HuggingFace in step 2 of the quickstart.
 
 For each room `N`, the panel expects:
 
@@ -331,25 +351,24 @@ For each room `N`, the panel expects:
 | `$USD_DIR/sample{N}_{fno_pred,unet_pred}_T_iso.usdc` | 2 temperature iso-surfaces (used when "Isosurface Mode" is on) |
 | `$METRICS_DIR/sample{N}_metrics.json` | per-field MAE + R² + GT range + inference latency |
 
-### 10.2 Adding rooms 3, 4, …
+### 10.2 Adding rooms beyond 10
 
-Three steps, run from the **research repo (298AB)**, not this one:
+Three steps, run from the **research repo ([298AB](https://github.com/irangareddy/298AB))**, not this one:
 
 1. **Have the raw test data** in `$DT_PROJ_ROOT/test_data/` for the new sample IDs (these come from the PhysicsNeMo dataset's test split).
-2. **Run inference + export** for each new sample with both surrogates. The exporter writes the `.usdc` files + a `_metrics.json` into the directories above. Entry point: `generate_assets.generate(...)` from `datacenter.dt.analytics/generate_assets.py` — invoke it offline from a notebook in the 298AB repo, or it auto-runs the first time the panel is opened on a fresh install (`_ensure_generated()`).
-3. **Edit two lines** in `config.py`:
+2. **Run inference + export** for each new sample with the 5 surrogates. The exporter writes the `.usdc` files + a `_metrics.json` into the directories above. Entry point: `generate_assets.generate(...)` from `datacenter.dt.analytics/generate_assets.py` — invoke it offline from a notebook in the 298AB repo, or it auto-runs the first time the panel is opened on a fresh install (`_ensure_generated()`).
+3. **Bump one line** in `config.py`:
    ```python
-   SAMPLES       = [0, 1, 2, 3, 4]
-   SAMPLE_LABELS = {0: "Room 0 (config 0)", 1: "Room 1 (config 1)", 2: "Room 2 (config 2)",
-                    3: "Room 3 (config 3)", 4: "Room 4 (config 4)"}
+   SAMPLES       = list(range(15))   # was range(10)
+   # SAMPLE_LABELS auto-generates from SAMPLES; no edit needed
    ```
    Save → the dropdown picks the new entries up on the next panel rebuild (Kit hot-reloads the extension on file change).
 
 ### 10.3 What does NOT live in this repo
 
-The **USD prediction files and metrics JSONs are not in `kit-app-template`** — they live in `~/298AB-dt-viewer/outputs/...`. This is intentional: kit-app-template is a public fork of NVIDIA's template and stays application-code-only; the surrogate model outputs are research artifacts and stay in the research repo. The `DT_PROJ_ROOT` / `DT_USD_DIR` / `DT_METRICS_DIR` env vars decouple the two.
+The **USD prediction files and metrics JSONs are not in `kit-app-template`** — they live under `~/boreas-data/` (or wherever `$DT_PROJ_ROOT` points). This is intentional: kit-app-template is a public fork of NVIDIA's template and stays application-code-only; the surrogate outputs are research data and ship from a separate HuggingFace dataset (`huggingface.co/datasets/irangareddy/boreas-data`). The `DT_PROJ_ROOT` / `DT_USD_DIR` / `DT_METRICS_DIR` env vars decouple the two.
 
-For demo-day reproducibility on a fresh machine: clone this repo, set `DT_PROJ_ROOT` to wherever the research repo's `outputs/` directory is, then build + launch.
+For demo-day reproducibility on a fresh machine: follow the 3-step quickstart in §1 — clone code, clone data via Git LFS, build, launch.
 
 ---
 
@@ -396,7 +415,7 @@ kit-app-template/
 1. **Launch**: `_build\windows-x86_64\release\datacenter.dt.viewer.bat`
 2. Wait for Kit window (15-30 s on warm shader cache, longer on first launch)
 3. **Window → Boreas Operator** if panel not visible (it is by default)
-4. Select **Room 0**, **U-Net (9.2 M params)**, **Temperature**
+4. Select **Room 0**, **U-Net (22.6 M params)**, **Temperature**
 5. Click **Load Scene** — GT (left) and U-Net prediction (right) appear 10 m apart
 6. Read the metric strips aloud:
    - *"Best for Temperature: U-Net — 0.205 °C MAE — 2.4× more accurate than FNO"*
