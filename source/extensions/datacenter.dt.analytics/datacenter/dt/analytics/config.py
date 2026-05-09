@@ -53,3 +53,9 @@ SIDE_BY_SIDE_OFFSET = 10.0
 
 # Grid spacing in meters (matches generate_assets.SPACING).
 SPACING_M = 0.04
+
+# Live sensor stream (synthetic or real).
+# Set BOREAS_LIVE_URL to the GB10 sensor stream endpoint.
+# Empty string = disabled (default, use pre-computed data).
+LIVE_STREAM_URL = os.environ.get("BOREAS_LIVE_URL", "")
+LIVE_POLL_INTERVAL_S = float(os.environ.get("BOREAS_LIVE_INTERVAL", "2.0"))

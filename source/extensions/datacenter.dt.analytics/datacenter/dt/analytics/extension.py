@@ -72,11 +72,61 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         self.state = ViewState()
         self._metrics = {}
         self._laptop_latency = {}  # measured on this 5080 — filled by _load_metrics
+        self._live_label = None    # UI label for live stream status
+        self._live_running = False
         self._load_metrics()
         self._build_ui()
         self._register_menu()
+        self._start_live_stream()
+
+    def _start_live_stream(self):
+        """Poll the synthetic sensor stream if BOREAS_LIVE_URL is set."""
+        from .config import LIVE_STREAM_URL, LIVE_POLL_INTERVAL_S
+        if not LIVE_STREAM_URL:
+            logger.info("Live stream disabled (set BOREAS_LIVE_URL to enable)")
+            return
+
+        import asyncio
+
+        self._live_running = True
+        logger.info(f"Live stream polling {LIVE_STREAM_URL} every {LIVE_POLL_INTERVAL_S}s")
+
+        async def _poll_loop():
+            import urllib.request
+            while self._live_running:
+                try:
+                    url = f"{LIVE_STREAM_URL}/live/summary"
+                    with urllib.request.urlopen(url, timeout=3) as resp:
+                        data = json.loads(resp.read())
+                    t_min = data.get("t_min", 0)
+                    t_max = data.get("t_max", 0)
+                    t_mean = data.get("t_mean", 0)
+                    ashrae = data.get("ashrae_a1", "N/A")
+                    drift = data.get("drift_c", 0)
+                    hotspot = data.get("hotspot_x_m", 0)
+                    ts = data.get("timestamp", 0)
+
+                    status = (
+                        f"LIVE t={ts:.0f}s | "
+                        f"T=[{t_min:.1f}, {t_max:.1f}]°C mean={t_mean:.1f}°C | "
+                        f"drift={drift:+.1f}°C | "
+                        f"hotspot@{hotspot:.0f}m | "
+                        f"{ashrae}"
+                    )
+                    if self._live_label:
+                        self._live_label.text = status
+                    logger.debug(status)
+                except Exception as e:
+                    if self._live_label:
+                        self._live_label.text = f"LIVE: connection error ({e})"
+                    logger.warning(f"Live stream error: {e}")
+
+                await asyncio.sleep(LIVE_POLL_INTERVAL_S)
+
+        asyncio.ensure_future(_poll_loop())
 
     def on_shutdown(self):
+        self._live_running = False
         self._unregister_menu()
         if self._window:
             self._window.destroy()
