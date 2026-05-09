@@ -148,6 +148,30 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
             logger.warning(f"generate_assets failed: {e}")
             traceback.print_exc()
 
+    def _open_anchored(self, source_path):
+        """Open a USD; in AVP/XR mode, wrap it Y-up so the floor lies flat.
+
+        Source CFD data is Z-up (OpenFOAM convention); Omniverse XR streams Y-up.
+        The AVP variant kit sets /app/xr_anchor=true; the desktop variant leaves
+        it unset and opens directly so the existing Z-up authoring view is kept.
+        """
+        import carb.settings
+        if not carb.settings.get_settings().get("/app/xr_anchor"):
+            omni.usd.get_context().open_stage(str(source_path))
+            return
+
+        wrapper = USD_DIR / "_xr_wrapper.usda"
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        root = UsdGeom.Xform.Define(stage, "/World")
+        stage.SetDefaultPrim(root.GetPrim())
+        root.AddRotateXYZOp().Set(Gf.Vec3f(-90.0, 0.0, 0.0))
+        inner = UsdGeom.Xform.Define(stage, "/World/Scene")
+        inner.GetPrim().GetReferences().AddReference(source_path.as_posix())
+        stage.GetRootLayer().Export(str(wrapper))
+        omni.usd.get_context().open_stage(str(wrapper))
+
     def _load_single(self, model, field, is_error=False, is_iso=False):
         if is_error:
             tag = "fno" if model == "fno_pred" else "unet"
@@ -206,7 +230,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
             stage.GetRootLayer().Export(str(compose_path))
             logger.debug(f"composed stage saved -> {compose_path}")
-            omni.usd.get_context().open_stage(str(compose_path))
+            self._open_anchored(compose_path)
             self._frame_all()
         except Exception as e:
             import traceback
@@ -227,7 +251,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
 
         logger.debug(f"_load_single_scene -> {path}  exists={path.exists()}")
         if path.exists():
-            omni.usd.get_context().open_stage(str(path))
+            self._open_anchored(path)
             self._frame_all()
         else:
             logger.warning("ABORT \u2014 file not found (if Isosurface Mode is checked, iso USDs aren't generated yet)")
@@ -238,7 +262,7 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         self._ensure_generated()
         path = self._load_single("ground_truth", self.state.field)
         if path.exists():
-            omni.usd.get_context().open_stage(str(path))
+            self._open_anchored(path)
             self._frame_all()
         self._rebuild_metrics_panel()
 

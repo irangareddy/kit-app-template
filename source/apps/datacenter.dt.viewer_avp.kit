@@ -21,6 +21,7 @@ template_name = "omni.streaming_configuration"
 [settings]
 xr.openxr.preferNVOpaqueDataChannel = true         # NVIDIA-required for AVP CloudXR (per setup-sdk.html)
 rtx.verifyDriverVersion.enabled = false
+app.xr_anchor = true                               # Wrap loaded scenes in a Y-up Xform so the floor lies flat in the headset
 
 [settings.app]
 fastShutdown = true
