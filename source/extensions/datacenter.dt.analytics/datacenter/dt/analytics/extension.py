@@ -77,7 +77,22 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         self._load_metrics()
         self._build_ui()
         self._register_menu()
-        self._start_live_stream()
+
+    def _toggle_live(self):
+        """Toggle live streaming on/off."""
+        if self._live_running:
+            self._live_running = False
+            self._btn_live.text = "Start Live"
+            self._btn_live.style = {"background_color": 0xFF1A6B1A, "color": 0xFF44FF44,
+                                    "font_size": 13, "border_radius": 6}
+            if self._live_label:
+                self._live_label.text = "  LIVE: stopped"
+            logger.info("Live stream stopped")
+        else:
+            self._start_live_stream()
+            self._btn_live.text = "Stop Live"
+            self._btn_live.style = {"background_color": 0xFF6B1A1A, "color": 0xFFFF4444,
+                                    "font_size": 13, "border_radius": 6}
 
     def _start_live_stream(self):
         """Poll the synthetic sensor stream if BOREAS_LIVE_URL is set."""
@@ -931,6 +946,24 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                         tooltip="Load only the ground-truth USD for the current Room and Field — no surrogate prediction, no error overlay, no isosurface. Useful as a clean reference view.",
                     )
                     btn_gt.set_clicked_fn(self._load_gt_only)
+
+                # Live streaming button (only if BOREAS_LIVE_URL is configured)
+                from .config import LIVE_STREAM_URL
+                if LIVE_STREAM_URL:
+                    with ui.HStack(height=36, spacing=6):
+                        self._btn_live = ui.Button(
+                            "Start Live",
+                            style={"background_color": 0xFF1A6B1A, "color": 0xFF44FF44,
+                                   "font_size": FS_BODY, "border_radius": 6},
+                            tooltip="Start synthetic sensor stream — thermal field animates every 2s with CRAC cycling, hotspot drift, and ASHRAE compliance monitoring.",
+                        )
+                        self._btn_live.set_clicked_fn(self._toggle_live)
+                    with ui.ZStack(height=28):
+                        ui.Rectangle(style={"background_color": 0xFF1A2A1A, "border_radius": 4})
+                        self._live_label = ui.Label(
+                            "  LIVE: ready (press Start Live after Load Scene)",
+                            style={"font_size": 11, "color": 0xFF44FF44},
+                        )
 
                 ui.Spacer(height=4)
 
