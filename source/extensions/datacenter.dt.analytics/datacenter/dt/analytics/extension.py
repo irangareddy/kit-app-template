@@ -936,14 +936,14 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                         "Load Scene",
                         style={"background_color": ACCENT, "color": WHITE,
                                "font_size": FS_BODY, "border_radius": 6},
-                        tooltip="Apply the current Room / Surrogate / Field / checkbox selection: assemble the USD compose stage and frame the camera. Press this after changing any control.",
+                        tooltip="Load GT + Prediction side-by-side for the selected Room / Surrogate / Field.",
                     )
                     btn_load.set_clicked_fn(self._on_load)
                     btn_gt = ui.Button(
-                        "GT Only",
+                        "Ground Truth",
                         style={"background_color": SECONDARY, "color": WHITE,
                                "font_size": FS_BODY, "border_radius": 6},
-                        tooltip="Load only the ground-truth USD for the current Room and Field — no surrogate prediction, no error overlay, no isosurface. Useful as a clean reference view.",
+                        tooltip="Load only the CFD ground truth — no surrogate prediction. Clean reference view.",
                     )
                     btn_gt.set_clicked_fn(self._load_gt_only)
 
