@@ -120,12 +120,17 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
                     if self._live_label:
                         self._live_label.text = status
 
-                    # Update point cloud colors in the viewport
+                    # Update point cloud colors in the viewport (dispatch to main thread)
                     if "data" in data and "mask" in data:
                         shape = data["shape"]
                         vals = np.array(data["data"], dtype=np.float32).reshape(shape)
-                        mask = np.array(data["mask"], dtype=np.float32).reshape(shape)
-                        self._update_live_viewport(vals, mask, t_min, t_max)
+                        mask_arr = np.array(data["mask"], dtype=np.float32).reshape(shape)
+                        # CRITICAL: USD modifications must happen on the main thread
+                        import omni.kit.app
+                        _vals, _mask, _tmin, _tmax = vals, mask_arr, t_min, t_max
+                        async def _deferred_update():
+                            self._update_live_viewport(_vals, _mask, _tmin, _tmax)
+                        asyncio.ensure_future(_deferred_update())
 
                     logger.debug(status)
                 except Exception as e:
@@ -138,71 +143,64 @@ class DatacenterDTAnalyticsExtension(omni.ext.IExt):
         asyncio.ensure_future(_poll_loop())
 
     def _update_live_viewport(self, vals, mask, vmin, vmax):
-        """Recolor the prediction point cloud with live thermal data."""
+        """Recolor the prediction point cloud with live thermal data.
+
+        Fixes applied:
+        - Uses GetDisplayColorPrimvar() (matches how generate_assets creates colors)
+        - Clips color channels to [0, 1]
+        - Logs mismatch warnings
+        """
         import numpy as np
+        from pxr import Vt
 
         stage = omni.usd.get_context().get_stage()
         if not stage:
             return
 
-        # Find all Field prims in the composed stage
-        # Composed paths: /DatacenterComparison/Prediction/World/Field
-        #                 /DatacenterComparison/GroundTruth/World/Field
-        #                 /World/Field (single scene)
-        candidate_paths = [
-            "/DatacenterComparison/Prediction/World/Field",
-            "/DatacenterComparison/GroundTruth/World/Field",
-            "/World/Field",
-        ]
-
-        prim = None
-        for p in candidate_paths:
-            prim = stage.GetPrimAtPath(p)
-            if prim and prim.IsValid():
-                break
-
-        if not prim or not prim.IsValid():
-            # Search all prims for any Points prim
-            for p in stage.Traverse():
-                if p.IsA(UsdGeom.Points):
-                    prim = p
-                    logger.debug(f"Live viewport: found Points at {p.GetPath()}")
-                    break
-
-        if not prim or not prim.IsValid():
-            return
-
-        pts = UsdGeom.Points(prim)
-        if not pts:
-            return
-
-        # Apply turbo colormap to the new values
+        # Build colormap from live values
         flat = vals.flatten()
         mask_flat = mask.flatten()
         t = np.clip((flat - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
 
-        # Simple turbo-like colormap: blue → cyan → green → yellow → red
+        # Turbo-like colormap: blue → cyan → green → yellow → red
         r = np.where(t < 0.25, 0.0, np.where(t < 0.5, (t - 0.25) * 4, np.where(t < 0.75, 1.0, 1.0)))
         g = np.where(t < 0.25, t * 4, np.where(t < 0.5, 1.0, np.where(t < 0.75, 1.0 - (t - 0.5) * 4, 0.0)))
         b = np.where(t < 0.25, 1.0, np.where(t < 0.5, 1.0 - (t - 0.25) * 4, 0.0))
 
-        # Zero out solid regions
-        r *= mask_flat
-        g *= mask_flat
-        b *= mask_flat
+        # Clip to valid range and zero out solid regions
+        r = np.clip(r, 0.0, 1.0) * mask_flat
+        g = np.clip(g, 0.0, 1.0) * mask_flat
+        b = np.clip(b, 0.0, 1.0) * mask_flat
 
         colors = np.stack([r, g, b], axis=-1).astype(np.float32)
+        color_data = Vt.Vec3fArray.FromNumpy(colors)
 
-        from pxr import Vt
-
-        # Update ALL Points prims in the stage (GT + Prediction)
+        updated = 0
         for p in stage.Traverse():
-            if p.IsA(UsdGeom.Points):
-                pts_prim = UsdGeom.Points(p)
-                existing_colors = pts_prim.GetDisplayColorAttr().Get()
-                if existing_colors and len(existing_colors) == len(colors):
-                    pts_prim.GetDisplayColorAttr().Set(Vt.Vec3fArray.FromNumpy(colors))
-                    logger.debug(f"Live: updated {p.GetPath()} ({len(colors)} pts)")
+            if not p.IsA(UsdGeom.Points):
+                continue
+            pts_prim = UsdGeom.Points(p)
+
+            # Use primvar (how generate_assets creates colors)
+            primvar = pts_prim.GetDisplayColorPrimvar()
+            if primvar and primvar.Get():
+                existing = primvar.Get()
+                if len(existing) == len(colors):
+                    primvar.Set(color_data)
+                    updated += 1
+                    logger.debug(f"Live: updated primvar {p.GetPath()} ({len(colors)} pts)")
+                else:
+                    logger.warning(f"Live: mismatch {p.GetPath()} USD={len(existing)} stream={len(colors)}")
+            else:
+                # Fallback to plain attribute
+                attr = pts_prim.GetDisplayColorAttr()
+                if attr and attr.Get() and len(attr.Get()) == len(colors):
+                    attr.Set(color_data)
+                    updated += 1
+                    logger.debug(f"Live: updated attr {p.GetPath()} ({len(colors)} pts)")
+
+        if updated > 0:
+            logger.debug(f"Live: {updated} prims updated")
 
     def on_shutdown(self):
         self._live_running = False
